@@ -136,30 +136,56 @@ fn slugify(name: &str) -> String {
     }
 }
 
-/// Hides iRecon's own windows just long enough to grab the screen underneath
-/// them, then restores them even when the capture fails.
+/// Hides every iRecon window just long enough to grab the screen underneath,
+/// then restores them even when the capture fails. Each window is hidden by
+/// handle rather than by guessed label, and the capture waits for the window
+/// server to report them hidden instead of trusting a fixed delay.
 fn capture_without_window(app: &AppHandle) -> Result<RgbaImage, String> {
     let monitor = crate::capture::pick_monitor()?;
-    let windows: Vec<tauri::WebviewWindow> = ["main", "overlay"]
-        .iter()
-        .filter_map(|label| app.get_webview_window(label))
+    // Remember which windows were on screen, so a hidden overlay stays hidden
+    // and the main window is the one that gets focus back.
+    let windows: Vec<(tauri::WebviewWindow, bool)> = app
+        .webview_windows()
+        .into_values()
+        .map(|window| {
+            let was_visible = window.is_visible().unwrap_or(false);
+            (window, was_visible)
+        })
         .collect();
 
-    for window in &windows {
-        let _ = window.hide();
+    let shown: Vec<&tauri::WebviewWindow> = windows
+        .iter()
+        .filter(|(_, was_visible)| *was_visible)
+        .map(|(window, _)| window)
+        .collect();
+
+    for window in &shown {
+        if let Err(error) = window.hide() {
+            return Err(format!("Could not hide the window for the grab: {error}"));
+        }
     }
 
-    // The window server needs a moment before the frame stops containing us.
-    if !windows.is_empty() {
-        std::thread::sleep(std::time::Duration::from_millis(220));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+    while std::time::Instant::now() < deadline {
+        if shown
+            .iter()
+            .all(|window| !window.is_visible().unwrap_or(true))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
+
+    // One more compositor frame so the hidden window is really gone from the
+    // display before it is read back.
+    std::thread::sleep(std::time::Duration::from_millis(150));
 
     let captured = monitor.capture_image();
 
-    for window in &windows {
+    for window in &shown {
         let _ = window.show();
     }
-    if let Some(window) = windows.first() {
+    if let Some((window, _)) = windows.iter().find(|(window, _)| window.label() == "main") {
         let _ = window.set_focus();
     }
 

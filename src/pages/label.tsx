@@ -39,8 +39,25 @@ function FrameStage({
   onBox,
   className = "max-h-[70vh]",
 }: FrameStageProps) {
+  const stage = useRef<HTMLDivElement | null>(null);
+  const [baseWidth, setBaseWidth] = useState(0);
   const [draft, setDraft] = useState<Box | null>(null);
   const start = useRef<{ x: number; y: number } | null>(null);
+
+  // The picture is sized in pixels from the measured stage, not as a percentage
+  // of it. A percentage width inside a scroll container can fight the scrollbars
+  // and leave the webview relaying out without end once zoom makes it overflow.
+  useEffect(() => {
+    const element = stage.current;
+    if (!element) return;
+    // Capped at the window width: a runaway measurement can never ask for a
+    // bitmap wider than the screen, which is what froze the webview at high zoom.
+    const measure = () => setBaseWidth(Math.min(element.clientWidth, window.innerWidth));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   function point(event: ReactPointerEvent<HTMLDivElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -88,14 +105,21 @@ function FrameStage({
   }
 
   const active = draft ?? box;
+  const width = Math.max(1, Math.round(baseWidth * zoom));
+  const height =
+    baseWidth > 0
+      ? Math.max(1, Math.round((width * frame.height) / frame.width))
+      : 1;
 
   return (
     <div
+      ref={stage}
       className={`overflow-auto rounded-md border border-border ${className}`}
+      style={{ scrollbarGutter: "stable" }}
     >
       <div
         className="relative cursor-crosshair select-none"
-        style={{ width: `${zoom * 100}%` }}
+        style={{ width, height }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -107,7 +131,8 @@ function FrameStage({
         <img
           src={frame.preview}
           alt="Grabbed frame"
-          className="pointer-events-none w-full"
+          className="pointer-events-none block"
+          style={{ width, height }}
           draggable={false}
         />
         {active ? (
@@ -136,7 +161,7 @@ function ZoomControls({
   return (
     <div className="flex items-center gap-1.5">
       <span className="text-xs text-muted-foreground">Zoom</span>
-      {[1, 2, 4, 8].map((level) => (
+      {[1, 2, 3, 4].map((level) => (
         <Button
           key={level}
           size="sm"
@@ -341,7 +366,7 @@ export function LabelPage() {
         </div>
 
         <div className="grid gap-2.5 lg:grid-cols-[1.6fr_1fr]">
-          <Card>
+          <Card className="min-w-0">
             <CardHeader className="flex flex-row items-start justify-between gap-2">
               <div className="flex flex-col gap-1.5">
                 <CardTitle>Frame</CardTitle>
@@ -355,9 +380,8 @@ export function LabelPage() {
                   {frame.width} by {frame.height}
                 </Badge>
               ) : null}
-            </CardHeader>
-            <CardContent>
-              {frame ? (
+            </CardHeader>          <CardContent className="min-w-0">
+            {frame ? (
                 <FrameStage frame={frame} zoom={zoom} box={box} onBox={setBox} />
               ) : (
                 <Skeleton className="aspect-video w-full" />
@@ -385,7 +409,7 @@ export function LabelPage() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="min-w-0">
             <CardHeader>
               <CardTitle>Class</CardTitle>
               <CardDescription>

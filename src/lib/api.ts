@@ -55,8 +55,25 @@ export async function deleteProject(id: number): Promise<void> {
   await invoke("project_delete", { id });
 }
 
+let demoFrameId = 1;
+
+/** A stand-in frame so the labeling and zoom controls can be exercised in a browser. */
+function demoFrame(): FrameView {
+  const width = 1600;
+  const height = 900;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="${width}" height="${height}" fill="#2b3440"/><rect x="150" y="320" width="420" height="250" rx="18" fill="#d05f3f"/><rect x="760" y="410" width="340" height="180" rx="14" fill="#4f7d5a"/><circle cx="1330" cy="220" r="100" fill="#c9c2a8"/><rect x="80" y="700" width="1440" height="14" fill="#8b93a1"/></svg>`;
+  return {
+    id: demoFrameId++,
+    path: "preview/frame.png",
+    width,
+    height,
+    preview: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 export async function grabFrame(projectId: number): Promise<FrameView> {
-  if (!isDesktop) throw new Error("Capturing a frame needs the desktop app");
+  if (!isDesktop) return demoFrame();
   return invoke<FrameView>("frame_grab", { projectId });
 }
 
