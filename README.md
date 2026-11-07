@@ -38,6 +38,21 @@ Fine-tuning a detector is a later step, for objects stage one refuses to propose
 
 Tauri v2 shell, React and TypeScript front end, shadcn/ui components and Tailwind, Rust core for capture, inference and storage, ONNX Runtime for models, SQLite per project. No OpenCV dependency; see [the architecture note](docs/02-architecture.md#why-not-opencv) for why.
 
+## Running it
+
+Needs Node 20 or newer, a Rust toolchain, and the platform build tools Tauri expects: Xcode command line tools on macOS, MSVC build tools and WebView2 on Windows.
+
+```bash
+npm install
+npm run tauri dev
+```
+
+The first build compiles the Rust side and takes a minute or two. After that, front end edits reload instantly and Rust edits recompile.
+
+On macOS the first capture run asks for Screen Recording. Grant it to iRecon, then restart the app, or the preview stays black. Windows asks for nothing. A game in exclusive fullscreen is the case that will not work, so run it in borderless windowed.
+
+`npm run build` typechecks and builds the front end without opening the desktop window.
+
 ## Layout
 
 ```
