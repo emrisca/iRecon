@@ -80,11 +80,11 @@ A second Tauri window, not a child of the main one: `transparent: true`, `decora
 
 | Role | Model | Size | Latency at 640, CPU | License |
 | --- | --- | --- | --- | --- |
-| Proposals | YOLO11n or RT-DETR-nano, ONNX, opset 17 | 6 to 12 MB | 10 to 30 ms | YOLO11 is AGPL-3.0, RT-DETR is Apache-2.0 |
+| Proposals | RF-DETR Nano, ONNX, 384 by 384 | about 120 MB | 15 to 40 ms on CPU, 5 to 15 with CoreML | Apache-2.0, ships in a closed app |
 | Embedding | SigLIP or CLIP image encoder, small variant, ONNX | 20 to 90 MB | 3 to 8 ms per batch of 8 crops | SigLIP Apache-2.0, CLIP MIT |
 | HUD templates | User crops | negligible | under 1 ms | user's own |
 
-**Licensing is a shipping decision, not a detail.** Ultralytics models are AGPL-3.0: a distributed closed-source app that bundles them needs their commercial licence. If iRecon will ever be sold or shipped as a binary without source, pick an Apache-2.0 detector from the start (RT-DETR, YOLOX, RF-DETR) or carry the licence cost. Deciding this after the detector is wired in means re-testing detection quality on a different model.
+**Licensing is a shipping decision, not a detail.** Ultralytics models are AGPL-3.0: a distributed closed-source app that bundles them needs their commercial licence. The choice is recorded in [models](05-models.md): RF-DETR Nano, Apache 2.0, no NMS, 384 input. Deciding this after the detector is wired in would mean re-testing detection quality against a different model.
 
 Embeddings are stored as little-endian `f32` blobs with the model name beside them. Changing encoder invalidates the pool, so the encoder is versioned per project and the app re-embeds examples in the background when it changes.
 

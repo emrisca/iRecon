@@ -20,7 +20,7 @@ Acceptance: overlay visible over the game for ten minutes, boxes where the code 
 **Question B, is the shipped detector useful on this footage?** Offline, no Tauri.
 
 - Grab a hundred frames from a recorded session of Assetto Corsa traffic.
-- Run the candidate detector on them at 640.
+- Run RF-DETR Nano on them at 384, then at 512 with Small.
 - Count: boxes on cars, boxes on things that are not cars, cars with no box.
 
 Acceptance: at least 80 percent of visible NPC cars get a box, and false positives are detached blobs that a matcher can reject rather than merged into one giant box. If this fails, the project needs a custom detector and the plan changes before Phase 2.
@@ -42,7 +42,7 @@ Exit: a project can be created, filled with examples by hand, and reopened after
 ## Phase 2: the live loop
 
 - Capture thread and ring buffer, engine thread, overlay window.
-- Detector proposals and NMS, box size floor.
+- RF-DETR proposals, score filter, box size floor. No NMS: the model returns a fixed query set.
 - Encoder, project pool load, matching, per class threshold.
 - Overlay canvas with boxes, labels, confidence, per class visibility.
 - Status bar: fps, inference time, device, dropped frames.

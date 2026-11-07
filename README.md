@@ -20,7 +20,7 @@ Step 5 is the part most tools leave to you. Here it is the main screen.
 
 Two stages, because one model cannot do both jobs well.
 
-**Stage one, proposals.** A small object detector, shipped with the app, finds everything that looks like a discrete object in the frame. It does not need to know your object. It only needs to say "something is here, look at this crop". This is what makes a handful of examples enough: you never train a detector from zero.
+**Stage one, proposals.** RF-DETR Nano, Apache 2.0 and shipped with the app, finds everything that looks like a discrete object in the frame. It does not need to know your object. It only needs to say "something is here, look at this crop". This is what makes a handful of examples enough: you never train a detector from zero.
 
 **Stage two, identity.** Each proposal crop is passed through an image encoder that turns it into a vector. The project stores vectors for your examples, and a crop is a match when it lands close enough to one of them. A new example is a new row, not a training run, so adding one takes effect immediately.
 
@@ -45,6 +45,7 @@ docs/01-product.md        what it does, who for, features by phase
 docs/02-architecture.md   pipeline, crates, data model, IPC, budgets
 docs/03-roadmap.md        phases, spike checklist, risks
 docs/04-decisions.md      decisions and what would reverse them
+docs/05-models.md          which detector, why that licence, what it must prove
 ```
 
 ## Documents

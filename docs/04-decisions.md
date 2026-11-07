@@ -66,11 +66,13 @@ The user's screenshots are game footage or their own desktop. Uploading them nee
 
 Reopen if: sharing a project's examples becomes a real request, and even then it should be an export the user chooses to move.
 
-## 11. Apache-2.0 detector unless distribution changes
+## 11. RF-DETR Nano as the shipped detector
 
-Ultralytics models are AGPL-3.0. For personal use that is fine. For a distributed binary it is a licensing event, not a footnote. The detector choice is cheap now and expensive after the matching pipeline is tuned around one model's output.
+Ultralytics models are AGPL-3.0, which turns a distributed binary into a licensing event. RF-DETR Nano is Apache 2.0, exports to ONNX, needs no NMS, and reports 48.4 AP against YOLOX Nano's 25.8. YOLOX was the other permissive option and lost on recall, which is the one thing the proposal stage cannot afford.
 
-Reopen only with a licence decision, made deliberately.
+The published latencies are GPU with TensorRT, so the CPU number is measured in Phase 0 before anything depends on it. Details in [models](05-models.md).
+
+Reopen if: Nano at 384 boxes under half the cars in real footage, which promotes RF-DETR Small at 512 or a project-trained detector.
 
 ## 12. Automation last
 
