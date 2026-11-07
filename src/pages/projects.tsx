@@ -86,7 +86,7 @@ export function ProjectsPage() {
             autoFocus
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder="Assetto traffic"
+            placeholder="Traffic watch"
             aria-label="Project name"
             maxLength={64}
           />

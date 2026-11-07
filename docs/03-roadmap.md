@@ -6,7 +6,7 @@ The order is chosen so that the things which can invalidate the idea are tested 
 
 Time box: two days. Throwaway code is fine. Two questions, one machine each.
 
-**Question A, can we draw over the game?** On the Windows machine, in Assetto Corsa, borderless windowed, 1440p or whatever the display is.
+**Question A, can we draw over the game?** On the Windows machine, in a borderless windowed game, 1440p or whatever the display is.
 
 - Tauri v2 shell, one button.
 - Capture the primary display through `scap`.
@@ -19,7 +19,7 @@ Acceptance: overlay visible over the game for ten minutes, boxes where the code 
 
 **Question B, is the shipped detector useful on this footage?** Offline, no Tauri.
 
-- Grab a hundred frames from a recorded session of Assetto Corsa traffic.
+- Grab a hundred frames from a recorded session of gameplay traffic.
 - Run RF-DETR Nano on them at 384, then at 512 with Small.
 - Count: boxes on cars, boxes on things that are not cars, cars with no box.
 

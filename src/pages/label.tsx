@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Crop, Trash2 } from "lucide-react";
+import { Crop, Maximize2, Minimize2, Trash2 } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -24,21 +24,148 @@ import {
 } from "../lib/api";
 import type { Box, ExampleView, FrameView, LabelClass, Project } from "../lib/types";
 
+type FrameStageProps = {
+  frame: FrameView;
+  zoom: number;
+  box: Box | null;
+  onBox: (box: Box | null) => void;
+  className?: string;
+};
+
+function FrameStage({
+  frame,
+  zoom,
+  box,
+  onBox,
+  className = "max-h-[70vh]",
+}: FrameStageProps) {
+  const [draft, setDraft] = useState<Box | null>(null);
+  const start = useRef<{ x: number; y: number } | null>(null);
+
+  function point(event: ReactPointerEvent<HTMLDivElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    };
+  }
+
+  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const at = point(event);
+    start.current = at;
+    onBox(null);
+    setDraft({ x: at.x, y: at.y, w: 0, h: 0 });
+  }
+
+  function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!start.current) return;
+    const at = point(event);
+    const from = start.current;
+    setDraft({
+      x: Math.min(from.x, at.x),
+      y: Math.min(from.y, at.y),
+      w: Math.abs(at.x - from.x),
+      h: Math.abs(at.y - from.y),
+    });
+  }
+
+  function onPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    const from = start.current;
+    start.current = null;
+    setDraft(null);
+    if (!from) return;
+    const at = point(event);
+    const next = {
+      x: Math.min(from.x, at.x),
+      y: Math.min(from.y, at.y),
+      w: Math.abs(at.x - from.x),
+      h: Math.abs(at.y - from.y),
+    };
+    if (next.w > 0.01 && next.h > 0.01) {
+      onBox(next);
+    }
+  }
+
+  const active = draft ?? box;
+
+  return (
+    <div
+      className={`overflow-auto rounded-md border border-border ${className}`}
+    >
+      <div
+        className="relative cursor-crosshair select-none"
+        style={{ width: `${zoom * 100}%` }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={() => {
+          start.current = null;
+          setDraft(null);
+        }}
+      >
+        <img
+          src={frame.preview}
+          alt="Grabbed frame"
+          className="pointer-events-none w-full"
+          draggable={false}
+        />
+        {active ? (
+          <div
+            className="pointer-events-none absolute border border-white ring-1 ring-black/60"
+            style={{
+              left: `${active.x * 100}%`,
+              top: `${active.y * 100}%`,
+              width: `${active.w * 100}%`,
+              height: `${active.h * 100}%`,
+            }}
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ZoomControls({
+  zoom,
+  onChange,
+}: {
+  zoom: number;
+  onChange: (zoom: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-xs text-muted-foreground">Zoom</span>
+      {[1, 2, 4, 8].map((level) => (
+        <Button
+          key={level}
+          size="sm"
+          variant={zoom === level ? "secondary" : "outline"}
+          className="tabular-nums"
+          aria-pressed={zoom === level}
+          onClick={() => onChange(level)}
+        >
+          {level}x
+        </Button>
+      ))}
+    </div>
+  );
+}
+
 export function LabelPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
   const [classes, setClasses] = useState<LabelClass[]>([]);
   const [frame, setFrame] = useState<FrameView | null>(null);
   const [box, setBox] = useState<Box | null>(null);
-  const [draft, setDraft] = useState<Box | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [fullscreen, setFullscreen] = useState(false);
   const [className, setClassName] = useState("");
   const [selected, setSelected] = useState<LabelClass | null>(null);
   const [examples, setExamples] = useState<ExampleView[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<number | null>(null);
-
-  const start = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -71,6 +198,8 @@ export function LabelPage() {
       });
     setFrame(null);
     setBox(null);
+    setZoom(1);
+    setFullscreen(false);
     setSelected(null);
     setExamples([]);
     setClassName("");
@@ -97,6 +226,15 @@ export function LabelPage() {
     };
   }, [selected]);
 
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFullscreen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullscreen]);
+
   async function refreshClasses(id: number) {
     const rows = await listClasses(id);
     setClasses(rows);
@@ -111,57 +249,10 @@ export function LabelPage() {
       const next = await grabFrame(projectId);
       setFrame(next);
       setBox(null);
-      setDraft(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
       setBusy(false);
-    }
-  }
-
-  function point(event: ReactPointerEvent<HTMLDivElement>) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return {
-      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
-      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
-    };
-  }
-
-  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!frame) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const at = point(event);
-    start.current = at;
-    setBox(null);
-    setDraft({ x: at.x, y: at.y, w: 0, h: 0 });
-  }
-
-  function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!start.current) return;
-    const at = point(event);
-    const from = start.current;
-    setDraft({
-      x: Math.min(from.x, at.x),
-      y: Math.min(from.y, at.y),
-      w: Math.abs(at.x - from.x),
-      h: Math.abs(at.y - from.y),
-    });
-  }
-
-  function onPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
-    const from = start.current;
-    start.current = null;
-    setDraft(null);
-    if (!from) return;
-    const at = point(event);
-    const next = {
-      x: Math.min(from.x, at.x),
-      y: Math.min(from.y, at.y),
-      w: Math.abs(at.x - from.x),
-      h: Math.abs(at.y - from.y),
-    };
-    if (next.w > 0.01 && next.h > 0.01) {
-      setBox(next);
     }
   }
 
@@ -202,7 +293,6 @@ export function LabelPage() {
     }
   }
 
-  const active = draft ?? box;
   const projectName = projects.find((project) => project.id === projectId)?.name;
 
   return (
@@ -218,7 +308,7 @@ export function LabelPage() {
             onClick={grab}
           >
             <Crop className="size-4" aria-hidden="true" />
-            Grab frame
+            {busy ? "Working" : "Grab frame"}
           </Button>
         }
       />
@@ -257,7 +347,7 @@ export function LabelPage() {
                 <CardTitle>Frame</CardTitle>
                 <CardDescription>
                   Drag a box around one object. The crop is taken from the full
-                  resolution frame, not from this scaled preview.
+                  resolution frame, not from the preview.
                 </CardDescription>
               </div>
               {frame ? (
@@ -268,43 +358,29 @@ export function LabelPage() {
             </CardHeader>
             <CardContent>
               {frame ? (
-                <div
-                  className="relative cursor-crosshair select-none overflow-hidden rounded-md border border-border"
-                  onPointerDown={onPointerDown}
-                  onPointerMove={onPointerMove}
-                  onPointerUp={onPointerUp}
-                  onPointerCancel={() => {
-                    start.current = null;
-                    setDraft(null);
-                  }}
-                >
-                  <img
-                    src={frame.preview}
-                    alt={`Frame from ${projectName ?? "the project"}`}
-                    className="pointer-events-none w-full"
-                    draggable={false}
-                  />
-                  {active ? (
-                    <div
-                      className="pointer-events-none absolute border border-white ring-1 ring-black/60"
-                      style={{
-                        left: `${active.x * 100}%`,
-                        top: `${active.y * 100}%`,
-                        width: `${active.w * 100}%`,
-                        height: `${active.h * 100}%`,
-                      }}
-                    />
-                  ) : null}
-                </div>
+                <FrameStage frame={frame} zoom={zoom} box={box} onBox={setBox} />
               ) : (
                 <Skeleton className="aspect-video w-full" />
               )}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <ZoomControls zoom={zoom} onChange={setZoom} />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  disabled={!frame}
+                  onClick={() => setFullscreen(true)}
+                >
+                  <Maximize2 className="size-4" aria-hidden="true" />
+                  Full screen
+                </Button>
+              </div>
               <p className="text-xs text-muted-foreground">
                 {frame
                   ? box
                     ? `Box ${(box.w * 100).toFixed(1)}% wide, ${(box.h * 100).toFixed(1)}% tall.`
-                    : "No box yet. Drag over the object."
-                  : "Press Grab frame to capture what is on screen right now."}
+                    : "No box yet. Drag over the object, or zoom in first."
+                  : "Press Grab frame. The app hides itself for a moment so it is not in the shot."}
               </p>
             </CardContent>
           </Card>
@@ -321,7 +397,7 @@ export function LabelPage() {
               <Input
                 value={className}
                 onChange={(event) => setClassName(event.target.value)}
-                placeholder="rival car"
+                placeholder="red car"
                 aria-label="Class name"
                 maxLength={40}
               />
@@ -428,6 +504,43 @@ export function LabelPage() {
           </Card>
         ) : null}
       </div>
+
+      {fullscreen && frame ? (
+        <div className="fixed inset-0 z-50 flex flex-col gap-2 bg-background p-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">
+                {projectName ? `${projectName} frame` : "Frame"}
+              </span>
+              <Badge variant="outline" className="tabular-nums">
+                {frame.width} by {frame.height}
+              </Badge>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <ZoomControls zoom={zoom} onChange={setZoom} />
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1.5"
+                onClick={() => setFullscreen(false)}
+              >
+                <Minimize2 className="size-4" aria-hidden="true" />
+                Close
+              </Button>
+            </div>
+          </div>
+          <FrameStage
+            frame={frame}
+            zoom={zoom}
+            box={box}
+            onBox={setBox}
+            className="min-h-0 flex-1"
+          />
+          <p className="text-xs text-muted-foreground">
+            Escape closes. Scroll to pan when zoomed.
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }

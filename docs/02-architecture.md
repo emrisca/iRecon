@@ -163,7 +163,7 @@ Matching is brute force: normalize each embedding, dot product against the pool,
 ~/Library/Application Support/iRecon/        (macOS)
 %APPDATA%\iRecon\                            (Windows)
   projects/
-    assetto-traffic/
+    traffic-watch/
       project.json
       project.sqlite
       examples/<class>/<uuid>.png

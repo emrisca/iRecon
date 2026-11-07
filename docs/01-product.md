@@ -2,7 +2,7 @@
 
 ## The problem
 
-Training a detector normally means a labelling tool, a dataset format, a training run, a GPU, and a wait. That is the right cost for a production model and the wrong cost for "I want to know when a police car is behind me in Assetto Corsa".
+Training a detector normally means a labelling tool, a dataset format, a training run, a GPU, and a wait. That is the right cost for a production model and the wrong cost for "I want to know when a police car is behind me in the game I am playing".
 
 The gap is not accuracy. It is the distance between having twenty screenshots and having something that runs on your screen. iRecon is an attempt to make that distance one afternoon, and to make improving it a by-product of using it.
 

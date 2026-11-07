@@ -81,7 +81,7 @@ Prefer SigLIP base first. If crop matching turns out to be the bottleneck on CPU
 
 ## What Phase 0 must answer
 
-Run the exported Nano model over 100 frames of recorded Assetto Corsa traffic at 384 and 512, on the machine that will run the app, and record:
+Run the exported Nano model over 100 frames of recorded gameplay traffic at 384 and 512, on the machine that will run the app, and record:
 
 1. How many visible NPC cars get a box, and how many boxes are not cars.
 2. Milliseconds per frame on CPU, and on the GPU execution provider if one is available.

@@ -136,13 +136,40 @@ fn slugify(name: &str) -> String {
     }
 }
 
+/// Hides iRecon's own windows just long enough to grab the screen underneath
+/// them, then restores them even when the capture fails.
+fn capture_without_window(app: &AppHandle) -> Result<RgbaImage, String> {
+    let monitor = crate::capture::pick_monitor()?;
+    let windows: Vec<tauri::WebviewWindow> = ["main", "overlay"]
+        .iter()
+        .filter_map(|label| app.get_webview_window(label))
+        .collect();
+
+    for window in &windows {
+        let _ = window.hide();
+    }
+
+    // The window server needs a moment before the frame stops containing us.
+    if !windows.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(220));
+    }
+
+    let captured = monitor.capture_image();
+
+    for window in &windows {
+        let _ = window.show();
+    }
+    if let Some(window) = windows.first() {
+        let _ = window.set_focus();
+    }
+
+    captured.map_err(|e| format!("Could not capture the screen: {e}"))
+}
+
 #[tauri::command]
 pub fn frame_grab(app: AppHandle, project_id: i64) -> Result<FrameView, String> {
     let (_slug, folder) = project_folder(&app, project_id)?;
-    let monitor = crate::capture::pick_monitor()?;
-    let image = monitor
-        .capture_image()
-        .map_err(|e| format!("Could not capture the screen: {e}"))?;
+    let image = capture_without_window(&app)?;
 
     let stamp = now_millis();
     let path = folder.join("frames").join(format!("{stamp}.png"));
