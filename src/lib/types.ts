@@ -15,6 +15,8 @@ export type CaptureStats = {
   captureMs: number;
   inferenceMs: number;
   detections: number;
+  poolClasses: number;
+  poolExamples: number;
   frames: number;
   errors: number;
   elapsedS: number;
@@ -37,11 +39,16 @@ export type Detection = {
   h: number;
 };
 
+export type TrackedBox = Detection & {
+  track: number;
+  seen: number;
+};
+
 export type DetectionPayload = {
   width: number;
   height: number;
   inferenceMs: number;
-  boxes: Detection[];
+  boxes: TrackedBox[];
 };
 
 export type Box = { x: number; y: number; w: number; h: number };
@@ -91,4 +98,24 @@ export type ModelProgress = {
   total: number;
   phase: "downloading" | "ready" | "loaded" | "failed" | string;
   message: string;
+};
+
+export type ClassMatch = {
+  classId: number;
+  name: string;
+  score: number;
+  similarity: number;
+  margin: number;
+  bestExample: number;
+  positives: number;
+  negatives: number;
+};
+
+export type DatasetExport = {
+  path: string;
+  frames: number;
+  boxes: number;
+  classes: number;
+  crops: number;
+  skipped: number;
 };

@@ -3,6 +3,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Box,
   CaptureStats,
+  ClassMatch,
+  DatasetExport,
   DetectionPayload,
   ExampleView,
   FramePayload,
@@ -95,6 +97,14 @@ export async function deleteClass(id: number): Promise<void> {
   await invoke("class_delete", { id });
 }
 
+export async function setClassThreshold(
+  id: number,
+  threshold: number
+): Promise<LabelClass> {
+  if (!isDesktop) throw new Error("Thresholds need the desktop app");
+  return invoke<LabelClass>("class_threshold", { id, threshold });
+}
+
 export async function createExample(
   classId: number,
   frameId: number,
@@ -116,9 +126,9 @@ export async function listExamples(classId: number): Promise<ExampleView[]> {
   return invoke<ExampleView[]>("examples_list", { classId });
 }
 
-export async function startCapture(): Promise<void> {
+export async function startCapture(projectId?: number): Promise<void> {
   if (!isDesktop) throw new Error("Screen capture needs the desktop app");
-  await invoke("capture_start");
+  await invoke("capture_start", { projectId });
 }
 
 export async function stopCapture(): Promise<void> {
@@ -181,4 +191,39 @@ export async function onModelProgress(
   return listen<ModelProgress>("model:progress", (event) =>
     handler(event.payload)
   );
+}
+
+export async function matchRegion(
+  projectId: number,
+  frameId: number,
+  box: Box
+): Promise<ClassMatch[]> {
+  if (!isDesktop) return [];
+  return invoke<ClassMatch[]>("match_region", {
+    projectId,
+    frameId,
+    x: box.x,
+    y: box.y,
+    w: box.w,
+    h: box.h,
+  });
+}
+
+export async function exportDataset(projectId: number): Promise<DatasetExport> {
+  if (!isDesktop) {
+    return {
+      path: "preview/export",
+      frames: 0,
+      boxes: 0,
+      classes: 0,
+      crops: 0,
+      skipped: 0,
+    };
+  }
+  return invoke<DatasetExport>("dataset_export", { projectId });
+}
+
+export async function embedExamples(projectId: number): Promise<number> {
+  if (!isDesktop) return 0;
+  return invoke<number>("examples_embed", { projectId });
 }

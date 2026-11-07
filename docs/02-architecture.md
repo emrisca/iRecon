@@ -61,6 +61,22 @@ Front end: React 19, TypeScript, Vite, Tailwind, shadcn/ui components, `lucide` 
 
 Capture of protected content (DRM video, some launchers) returns black frames on every platform. Treat black frames as a detectable state and say so in the UI instead of drawing nothing.
 
+### Grabbing without the app in frame
+
+The grab is one call, `grab::grab(&app)`, and the platform decides how the app stays out of the picture. A `ScreenSource` reports whether its capture already excludes this app's windows:
+
+- `Direct`: the capture leaves the windows out, so the frame comes back untouched.
+- `HideFirst`: the composited display includes them, so every visible iRecon window hides, a reference frame is taken, the screen is read up to four times, and the grab is accepted only when more than 0.4 percent of pixels changed. Windows are restored on every path. A grab that never sees that change saves nothing and returns the reason.
+
+Today every platform is `HideFirst`, because `xcap` reads the composited display. The two backends that flip it without touching the call site:
+
+| Platform | Backend | Exclusion |
+| --- | --- | --- |
+| Windows 10 2004+ | Windows Graphics Capture, or DXGI as a fallback | `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` on each iRecon window |
+| macOS 12.3+ | ScreenCaptureKit | `SCContentFilter(display:excludingApplications:exceptingWindows:)` |
+
+The pixel comparison is not a stand-in for a broken backend. It stays because a window's visibility flag says nothing about what the compositor has already drawn, and because a native backend can still fail to exclude a window it does not own. The proof is the same code on both paths, and the tests for it run without a display.
+
 ## Overlay
 
 A second Tauri window, not a child of the main one: `transparent: true`, `decorations: false`, `always_on_top: true`, `skip_taskbar: true`, `focus: false`, sized to the captured display.
@@ -87,6 +103,22 @@ A second Tauri window, not a child of the main one: `transparent: true`, `decora
 **Licensing is a shipping decision, not a detail.** Ultralytics models are AGPL-3.0: a distributed closed-source app that bundles them needs their commercial licence. The choice is recorded in [models](05-models.md): RF-DETR Nano, Apache 2.0, no NMS, 384 input. Deciding this after the detector is wired in would mean re-testing detection quality against a different model.
 
 Embeddings are stored as little-endian `f32` blobs with the model name beside them. Changing encoder invalidates the pool, so the encoder is versioned per project and the app re-embeds examples in the background when it changes.
+
+## Matching and export
+
+Live capture reloads the project pool every two seconds, crops every proposal out of the full frame, and keeps only proposals whose best class clears that class's threshold before emitting them to the overlay. A class with no examples cannot match, so an empty project draws nothing.
+
+Surviving boxes go through an IoU tracker: same label, at least 0.3 overlap, greedy best match, coordinates halved toward each new detection so a box stops jittering, and a track coasts through up to two missed frames once it has been seen three times. Each emitted box carries a `track` id and a `seen` count, which is the identity a later automation rule will refer to.
+
+An example is reduced to a 96-dimension fingerprint (`irecon-fingerprint-v2`): red and green ratios, luma, edge strength and a saturation-weighted hue direction on a 4 by 4 grid, with the average cell subtracted before normalising. The subtraction is what makes it work. Without it every pair of crops scored around 0.99, so no threshold could tell a match from a near miss. It is stored as a little-endian `f32` blob with the model name beside it, so replacing the fingerprint with an ONNX encoder changes the name and forces a lazy re-embed instead of comparing across two vector spaces. Scoring takes the best positive per class and subtracts the best negative, and each class's own threshold decides whether its box reaches the overlay.
+
+Each class's threshold is adjustable on the Label page in 5 percent steps, and the capture loop's pool reload applies it within two seconds.
+
+The default threshold is 0.85. `cargo run --example match_bench -- --demo` measured 72 synthetic crops in six classes plus 12 unknown blobs: top-1 was 1.000, correct crops averaged 0.997 against 0.000 for wrong ones, and 0.85 kept every correct crop while holding false accepts under 5 percent, where the old 0.55 default accepted all 12 blobs. Point the same tool at a folder of real crops, one subfolder per class and `__none__` for unknown objects, to re-tune on gameplay rather than synthetic shapes.
+
+Dataset export writes a YOLO detection layout: one image and one label file per source frame, `classes.txt`, `data.yaml`, the crops under `crops/<class>/`, and a `manifest.json` with counts, class indices, per-frame box counts and every skipped row. Examples with no source frame or an unreadable box are counted as skipped, never dropped silently.
+
+The agent surface (`agent_snapshot`, `agent_act`) exists only in development builds. It runs the same functions the UI calls, returns JSON instead of pixels, and appends one line per action to `agent-trace.jsonl` in the project so a run can be audited afterwards.
 
 ## Data model
 
@@ -195,6 +227,9 @@ Commands (front end calls Rust):
 | `candidate_list(state)` / `candidate_resolve(id, decision)` | queue |
 | `session_start(project, source, classes)` / `session_stop` | session row |
 | `engine_status` | device, model names, current fps, last inference ms |
+| `match_region(project, frame, box)` | ranked classes with score, margin and the example that matched |
+| `dataset_export(project)` | path, frame and box counts, skipped rows |
+| `agent_snapshot` / `agent_act` | development builds only; JSON state, JSON actions, one trace line each |
 
 Events (Rust pushes front end):
 

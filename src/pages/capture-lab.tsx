@@ -18,6 +18,7 @@ import {
   getModelStatus,
   hideOverlay,
   isDesktop,
+  listProjects,
   loadModel,
   onDetections,
   onFrame,
@@ -33,6 +34,7 @@ import type {
   FramePayload,
   ModelProgress,
   ModelStatus,
+  Project,
 } from "../lib/types";
 
 function metric(value: string, label: string) {
@@ -54,6 +56,8 @@ export function CaptureLabPage() {
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
   const [progress, setProgress] = useState<ModelProgress | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectId, setProjectId] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -91,6 +95,20 @@ export function CaptureLabPage() {
     };
   }, []);
 
+  useEffect(() => {
+    let alive = true;
+    listProjects()
+      .then((rows) => {
+        if (!alive) return;
+        setProjects(rows);
+        setProjectId((current) => current ?? rows[0]?.id ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   async function toggleCapture() {
     setBusy(true);
     setError(null);
@@ -99,7 +117,7 @@ export function CaptureLabPage() {
         await stopCapture();
         setRunning(false);
       } else {
-        await startCapture();
+        await startCapture(projectId ?? undefined);
         setRunning(true);
       }
     } catch (reason) {
@@ -175,7 +193,7 @@ export function CaptureLabPage() {
             size="sm"
             variant={running ? "outline" : "default"}
             className="gap-1.5"
-            disabled={busy}
+            disabled={busy || (!running && !projectId)}
             onClick={toggleCapture}
           >
             {running ? (
@@ -200,6 +218,27 @@ export function CaptureLabPage() {
         </p>
       ) : null}
 
+      <div className="flex flex-wrap items-center gap-2 border-b border-border p-2.5">
+        <span className="text-xs text-muted-foreground">Project</span>
+        {projects.length === 0 ? (
+          <span className="text-sm text-muted-foreground">
+            Create a project on the Projects page so boxes can be matched.
+          </span>
+        ) : (
+          projects.map((project) => (
+            <Button
+              key={project.id}
+              size="sm"
+              variant={project.id === projectId ? "secondary" : "ghost"}
+              disabled={running}
+              onClick={() => setProjectId(project.id)}
+            >
+              {project.name}
+            </Button>
+          ))
+        )}
+      </div>
+
       <div className="flex flex-col gap-2.5 p-2.5">
         <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
           {metric(stats ? stats.fps.toFixed(1) : "0.0", "Frames per second")}
@@ -219,9 +258,14 @@ export function CaptureLabPage() {
                 Downsampled to 640 px for the preview. Detection runs on the full frame.
               </CardDescription>
             </div>
-            <Badge variant="outline" className="tabular-nums">
-              {frame ? `${frame.width} by ${frame.height}` : "waiting"}
-            </Badge>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge variant="outline" className="tabular-nums">
+                {frame ? `${frame.width} by ${frame.height}` : "waiting"}
+              </Badge>
+              <Badge variant="outline" className="tabular-nums">
+                {stats ? `${stats.poolClasses} classes, ${stats.poolExamples} examples` : "no pool"}
+              </Badge>
+            </div>
           </CardHeader>
           <CardContent>
             {frame ? (
@@ -338,12 +382,13 @@ export function CaptureLabPage() {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle>What this build does not do yet</CardTitle>
-            <CardDescription>
-              Boxes are the shipped detector's proposals only. Nothing is matched to your
-              own examples yet, and the capture source is always the primary display.
-            </CardDescription>
+          <CardHeader>              <CardTitle>What this build does not do yet</CardTitle>
+              <CardDescription>
+                Boxes are the shipped detector's proposals, kept only when a class in the
+                selected project scores above that class's threshold. Each box keeps a track
+                id while it overlaps from frame to frame, and a single missed frame no longer
+                blanks it. The capture source is always the primary display.
+              </CardDescription>
           </CardHeader>
           <CardContent>
             <Separator />
