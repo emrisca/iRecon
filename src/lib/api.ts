@@ -18,7 +18,6 @@ import type {
 export const isDesktop =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-let demoProjects: Project[] = [];
 let demoId = 1;
 
 function demo(name: string): Project {
@@ -34,6 +33,87 @@ function demo(name: string): Project {
     createdAt: new Date().toISOString(),
   };
 }
+
+/**
+ * A seeded project so the Label page can be exercised without the desktop app:
+ * three classes with examples, and an anchor per class that lines up with a
+ * shape in the demo frame, so a box drawn over that shape scores its class
+ * highest and the nearest badges mean something.
+ */
+const demoSeed = demo("Demo project");
+let demoProjects: Project[] = [demoSeed];
+
+const DEMO_COLORS = ["#d05f3f", "#4f7d5a", "#c9a227", "#8b6fb0"];
+
+const demoClasses = new Map<number, LabelClass[]>();
+const demoExamples = new Map<number, ExampleView[]>();
+const demoAnchors = new Map<number, Box>();
+let demoClassId = 1;
+let demoExampleId = 1;
+
+function demoPreview(color: string, index: number): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160"><rect width="160" height="160" fill="#2b3440"/><rect x="${20 + (index % 3) * 8}" y="${24 + (index % 4) * 6}" width="${96 - (index % 3) * 10}" height="${88 - (index % 4) * 8}" rx="10" fill="${color}"/></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function demoExample(classId: number, color: string, index: number): ExampleView {
+  return {
+    id: demoExampleId++,
+    classId,
+    path: `examples/${classId}/${index + 1}.png`,
+    width: 96 + (index % 3) * 12,
+    height: 84 + (index % 4) * 9,
+    preview: demoPreview(color, index),
+    bbox: "0,0,1,1",
+    createdAt: new Date(Date.now() - index * 60_000).toISOString(),
+  };
+}
+
+function demoClassById(id: number): LabelClass | null {
+  for (const rows of demoClasses.values()) {
+    const found = rows.find((entry) => entry.id === id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function iou(a: Box, b: Box): number {
+  const left = Math.max(a.x, b.x);
+  const top = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.w, b.x + b.w);
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
+  const overlap = Math.max(0, right - left) * Math.max(0, bottom - top);
+  const union = a.w * a.h + b.w * b.h - overlap;
+  return union > 0 ? overlap / union : 0;
+}
+
+function seedDemoProject() {
+  const seeds = [
+    { name: "panel", threshold: 0.9, examples: 4, anchor: { x: 0.094, y: 0.356, w: 0.263, h: 0.278 } },
+    { name: "field", threshold: 0.85, examples: 3, anchor: { x: 0.475, y: 0.456, w: 0.213, h: 0.2 } },
+    { name: "marker", threshold: 0.7, examples: 2, anchor: { x: 0.769, y: 0.133, w: 0.125, h: 0.222 } },
+  ];
+  const classes: LabelClass[] = [];
+  seeds.forEach((seed, position) => {
+    const id = demoClassId++;
+    const color = DEMO_COLORS[position % DEMO_COLORS.length];
+    classes.push({
+      id,
+      name: seed.name,
+      color,
+      threshold: seed.threshold,
+      examples: seed.examples,
+    });
+    demoAnchors.set(id, seed.anchor);
+    demoExamples.set(
+      id,
+      Array.from({ length: seed.examples }, (_, index) => demoExample(id, color, index))
+    );
+  });
+  demoClasses.set(demoSeed.id, classes);
+}
+
+seedDemoProject();
 
 export async function listProjects(): Promise<Project[]> {
   if (!isDesktop) return demoProjects;
@@ -80,7 +160,7 @@ export async function grabFrame(projectId: number): Promise<FrameView> {
 }
 
 export async function listClasses(projectId: number): Promise<LabelClass[]> {
-  if (!isDesktop) return [];
+  if (!isDesktop) return (demoClasses.get(projectId) ?? []).map((entry) => ({ ...entry }));
   return invoke<LabelClass[]>("classes_list", { projectId });
 }
 
@@ -88,12 +168,37 @@ export async function createClass(
   projectId: number,
   name: string
 ): Promise<LabelClass> {
-  if (!isDesktop) throw new Error("Classes need the desktop app");
+  if (!isDesktop) {
+    const rows = demoClasses.get(projectId) ?? [];
+    if (rows.some((entry) => entry.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("A class with that name already exists");
+    }
+    const created: LabelClass = {
+      id: demoClassId++,
+      name,
+      color: DEMO_COLORS[rows.length % DEMO_COLORS.length],
+      threshold: 0.85,
+      examples: 0,
+    };
+    demoClasses.set(projectId, [...rows, created]);
+    demoExamples.set(created.id, []);
+    return { ...created };
+  }
   return invoke<LabelClass>("class_create", { projectId, name });
 }
 
 export async function deleteClass(id: number): Promise<void> {
-  if (!isDesktop) return;
+  if (!isDesktop) {
+    for (const [projectId, rows] of demoClasses) {
+      demoClasses.set(
+        projectId,
+        rows.filter((entry) => entry.id !== id)
+      );
+    }
+    demoExamples.delete(id);
+    demoAnchors.delete(id);
+    return;
+  }
   await invoke("class_delete", { id });
 }
 
@@ -101,7 +206,12 @@ export async function setClassThreshold(
   id: number,
   threshold: number
 ): Promise<LabelClass> {
-  if (!isDesktop) throw new Error("Thresholds need the desktop app");
+  if (!isDesktop) {
+    const target = demoClassById(id);
+    if (!target) throw new Error("That class is not in this project");
+    target.threshold = Math.min(1, Math.max(0, threshold));
+    return { ...target };
+  }
   return invoke<LabelClass>("class_threshold", { id, threshold });
 }
 
@@ -110,7 +220,24 @@ export async function createExample(
   frameId: number,
   box: Box
 ): Promise<ExampleView> {
-  if (!isDesktop) throw new Error("Examples need the desktop app");
+  if (!isDesktop) {
+    const target = demoClassById(classId);
+    if (!target) throw new Error("That class is not in this project");
+    const created: ExampleView = {
+      id: demoExampleId++,
+      classId,
+      path: `examples/${classId}/saved.png`,
+      width: Math.max(8, Math.round(box.w * 1600)),
+      height: Math.max(8, Math.round(box.h * 900)),
+      preview: demoPreview(target.color, target.examples),
+      bbox: `${box.x},${box.y},${box.w},${box.h}`,
+      createdAt: new Date().toISOString(),
+    };
+    const rows = demoExamples.get(classId) ?? [];
+    demoExamples.set(classId, [created, ...rows]);
+    target.examples = rows.length + 1;
+    return created;
+  }
   return invoke<ExampleView>("example_create", {
     classId,
     frameId,
@@ -122,7 +249,7 @@ export async function createExample(
 }
 
 export async function listExamples(classId: number): Promise<ExampleView[]> {
-  if (!isDesktop) return [];
+  if (!isDesktop) return (demoExamples.get(classId) ?? []).map((entry) => ({ ...entry }));
   return invoke<ExampleView[]>("examples_list", { classId });
 }
 
@@ -198,7 +325,26 @@ export async function matchRegion(
   frameId: number,
   box: Box
 ): Promise<ClassMatch[]> {
-  if (!isDesktop) return [];
+  if (!isDesktop) {
+    const rows = demoClasses.get(projectId) ?? [];
+    return rows
+      .map((entry) => {
+        const anchor = demoAnchors.get(entry.id);
+        const similarity = anchor ? iou(anchor, box) : 0;
+        const score = Math.min(1, 0.35 + 0.63 * similarity);
+        return {
+          classId: entry.id,
+          name: entry.name,
+          score,
+          similarity,
+          margin: Math.max(0, score - 0.15),
+          bestExample: (demoExamples.get(entry.id) ?? [])[0]?.id ?? 0,
+          positives: entry.examples,
+          negatives: 0,
+        };
+      })
+      .sort((left, right) => right.score - left.score);
+  }
   return invoke<ClassMatch[]>("match_region", {
     projectId,
     frameId,
@@ -211,6 +357,8 @@ export async function matchRegion(
 
 export async function exportDataset(projectId: number): Promise<DatasetExport> {
   if (!isDesktop) {
+    const rows = demoClasses.get(projectId) ?? [];
+    const boxes = rows.reduce((total, entry) => total + entry.examples, 0);
     return {
       path: "preview/export",
       frames: boxes > 0 ? 1 : 0,
