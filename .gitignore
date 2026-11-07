@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build
+dist/
+dist-ssr/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# models and datasets are large binaries, fetched or trained locally
+*.onnx
+models/
+datasets/
+
+# local app data if ever pointed at the repo
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+sessions/
+
+# editor and os
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.log
