@@ -1,14 +1,23 @@
-import { Crosshair, FolderKanban, Moon, ScanLine, Sun, type LucideIcon } from "lucide-react";
+import {
+  Crosshair,
+  FolderKanban,
+  Moon,
+  ScanLine,
+  Sun,
+  Tags,
+  type LucideIcon,
+} from "lucide-react";
 
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 import { cn } from "../lib/utils";
 
-export type Section = "projects" | "capture";
+export type Section = "projects" | "label" | "capture";
 
 const items: Array<{ id: Section; label: string; icon: LucideIcon }> = [
   { id: "projects", label: "Projects", icon: FolderKanban },
+  { id: "label", label: "Label", icon: Tags },
   { id: "capture", label: "Capture lab", icon: ScanLine },
 ];
 

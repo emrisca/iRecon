@@ -8,12 +8,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use xcap::Monitor;
 
+use crate::detector::Detection;
 use crate::AppState;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const REPORT_INTERVAL: Duration = Duration::from_millis(500);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(800);
 const PREVIEW_WIDTH: u32 = 640;
+const SCORE_THRESHOLD: f32 = 0.35;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,9 +26,12 @@ pub struct CaptureStats {
     pub height: u32,
     pub fps: f32,
     pub capture_ms: f32,
+    pub inference_ms: f32,
+    pub detections: u32,
     pub frames: u64,
     pub errors: u64,
     pub elapsed_s: f32,
+    pub model: Option<String>,
     pub note: Option<String>,
 }
 
@@ -38,11 +43,20 @@ pub struct FramePayload {
     pub height: u32,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectionPayload {
+    pub width: u32,
+    pub height: u32,
+    pub inference_ms: f32,
+    pub boxes: Vec<Detection>,
+}
+
 pub struct CaptureHandle {
     stop: Arc<AtomicBool>,
 }
 
-fn pick_monitor() -> Result<Monitor, String> {
+pub(crate) fn pick_monitor() -> Result<Monitor, String> {
     let monitors = Monitor::all().map_err(|e| format!("Could not list displays: {e}"))?;
     if monitors.is_empty() {
         return Err("No displays found".into());
@@ -74,6 +88,7 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let stats = state.stats.clone();
+    let detector = state.detector.clone();
     let app_handle = app.clone();
 
     thread::Builder::new()
@@ -83,6 +98,9 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
             let mut errors: u64 = 0;
             let mut note: Option<String> = None;
             let mut size = (0u32, 0u32);
+            let mut inference_ms = 0f32;
+            let mut detections = 0u32;
+            let mut model_name: Option<String> = None;
             let started = Instant::now();
             let mut last_report = Instant::now();
             let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
@@ -113,6 +131,38 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
                             let _ = app_handle.emit("spike:frame", payload);
                             last_preview = Instant::now();
                         }
+
+                        if let Ok(mut guard) = detector.lock() {
+                            if let Some(model) = guard.as_mut() {
+                                model_name = Some(model.describe());
+                                match model.analyse(
+                                    image.as_raw(),
+                                    image.width(),
+                                    image.height(),
+                                    SCORE_THRESHOLD,
+                                ) {
+                                    Ok((boxes, elapsed)) => {
+                                        inference_ms = elapsed;
+                                        detections = boxes.len() as u32;
+                                        let _ = app_handle.emit(
+                                            "spike:detections",
+                                            DetectionPayload {
+                                                width: image.width(),
+                                                height: image.height(),
+                                                inference_ms: elapsed,
+                                                boxes,
+                                            },
+                                        );
+                                    }
+                                    Err(error) => {
+                                        note = Some(error);
+                                    }
+                                }
+                            } else {
+                                model_name = None;
+                                detections = 0;
+                            }
+                        }
                     }
                     Err(error) => {
                         errors += 1;
@@ -139,9 +189,12 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
                         } else {
                             0.0
                         },
+                        inference_ms,
+                        detections,
                         frames,
                         errors,
                         elapsed_s: started.elapsed().as_secs_f32(),
+                        model: model_name.clone(),
                         note: note.clone(),
                     };
                     if let Ok(mut guard) = stats.lock() {
@@ -166,9 +219,12 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
                 height: size.1,
                 fps: 0.0,
                 capture_ms: 0.0,
+                inference_ms,
+                detections: 0,
                 frames,
                 errors,
                 elapsed_s: started.elapsed().as_secs_f32(),
+                model: model_name,
                 note,
             };
             if let Ok(mut guard) = stats.lock() {

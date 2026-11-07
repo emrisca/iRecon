@@ -4,6 +4,7 @@ import { AppSidebar, type Section } from "./components/app-sidebar";
 import { isDesktop } from "./lib/api";
 import { useTheme } from "./hooks/use-theme";
 import { CaptureLabPage } from "./pages/capture-lab";
+import { LabelPage } from "./pages/label";
 import { ProjectsPage } from "./pages/projects";
 
 export default function App() {
@@ -25,7 +26,9 @@ export default function App() {
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {section === "projects" ? <ProjectsPage /> : <CaptureLabPage />}
+          {section === "projects" ? <ProjectsPage /> : null}
+          {section === "label" ? <LabelPage /> : null}
+          {section === "capture" ? <CaptureLabPage /> : null}
         </div>
       </main>
     </div>

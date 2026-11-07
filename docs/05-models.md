@@ -33,19 +33,36 @@ The published 2.3 ms is a T4 GPU with TensorRT FP16. It says nothing about this 
 
 These are ranges to confirm, not measurements. Phase 0 question B produces the real number on the target machine, and the architecture's 30 fps target depends on it.
 
+First measurement, development Mac, CPU execution provider, debug build: **170 ms per frame** at 384 on an 810 by 1080 frame, and the same image decoded to the right boxes (bus 0.96, three people above 0.92). That is far outside the 15 to 40 ms estimate and outside a 30 fps budget, but it is an unoptimised debug build on a cold session. Re-measure in release, then with the CoreML provider, before deciding whether Nano at 384 is the shipping configuration or whether the proposal stage needs to be cheaper.
+
 ## Interface contract
 
-The exporter's output order is the thing that breaks integrations, so pin it with a test that runs on a known image and compares against a saved result.
+The exporter's output order is the thing that breaks integrations, so `detector.rs` pins it in `onnx_contract_is_pinned`, and the loader refuses a file whose input or output names do not match.
 
-- Input: `1 x 3 x 384 x 384`, float32, RGB, letterboxed with the padding colour the exporter was trained with.
-- Output: boxes as normalized centre `cx cy w h`, class scores, and labels. Filter at 0.3, keep the top 100, convert to corners, clamp, then scale back through the letterbox.
-- Preprocessing constants live in one Rust module with a test, because a wrong mean or a swapped channel order produces boxes that look plausible and are subtly wrong.
+- Input: a tensor named `input`, `1 x 3 x 384 x 384`, float32, RGB, **plain stretch** to 384 square. Not letterboxed: the export was trained and exported this way, and padding here shifts every box.
+- Normalisation: divide by 255, then ImageNet mean `[0.485, 0.456, 0.406]` and standard deviation `[0.229, 0.224, 0.225]`. Channel order is RGB, not BGR.
+- Outputs, matched **by name**, never by shape or index: `dets` `1 x 300 x 4` normalised centre `cx cy w h`, and `labels` `1 x 300 x 91` **pre-sigmoid** logits. Slot 0 is background. 300 queries, no NMS, so the set is already deduplicated.
+- Postprocessing: sigmoid each slot, take the best non-background slot per query, drop below 0.35, convert to corners, clamp to the frame, keep the top 100.
 
-If the exported graph expects a different resolution, take it from the session's input shape at load time rather than hardcoding 384.
+A wrong mean or a swapped channel order produces boxes that look plausible and are subtly wrong, so the constants and the preprocessing test live beside the decode in one module. Query count and class slots are probed from the loaded graph rather than assumed, and the test asserts 300 and 91 for this artifact.
+
+If a future export changes resolution or names, the loader fails loudly instead of silently misreading the output.
 
 ## Where the file lives
 
-`models/rf-detr-nano.onnx` under the app data directory, downloaded on first run only after a visible prompt, with the expected SHA-256 recorded in the app and checked on load. A model that fails the hash is refused rather than run.
+`models/rf-detr-nano.onnx` under the app data directory, downloaded on first request from the Model card on the Capture lab page. The expected SHA-256 is recorded in the app and checked again on load; a model that fails the hash is refused rather than run, and a partial download is deleted rather than resumed.
+
+The pinned artifact, an unofficial Apache-2.0 conversion of the unmodified COCO weights:
+
+| Field | Value |
+| --- | --- |
+| URL | `https://huggingface.co/open-noodle/rfdetr-nano/resolve/main/detection/model.onnx` |
+| Bytes | 107,835,234 |
+| SHA-256 | `21045851f3906c7d424874363fe933477fda7210bad0d7a69659fb98f8845890` |
+
+Verified on load: input `input`, outputs `dets` and `labels`, 300 queries, 91 class slots. The first artifact this project pinned went private, which is the reason the URL is a constant beside the hash rather than something fetched from a registry at runtime: a broken source is a one-line change, and nothing unverified is ever executed.
+
+`cargo run --example fetch_model` downloads and verifies without opening the app. `cargo run --example detect_image -- path/to.jpg` prints boxes for one image, which is the quickest way to check a new export before touching the UI.
 
 Bundling it into the installer is the alternative. It makes the download disappear and the installer about 120 MB larger. Start with the download, revisit at packaging time.
 

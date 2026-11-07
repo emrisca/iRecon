@@ -4,7 +4,7 @@ A desktop app that learns what you point it at, then boxes those things on your 
 
 You give it a handful of screenshots of the objects you care about: the rival cars in Assetto Corsa, a character in a game, a widget in an app. It finds them in live screen capture and draws a box around each one, with a confidence score. Everything stays on your machine. No upload, no account, no per-image billing.
 
-Status: planning. The documents here are the design. Code starts with the capture and overlay spike in [the roadmap](docs/03-roadmap.md), because that spike is the only part of the idea that can kill it.
+Status: spike running. Capture, the transparent overlay and RF-DETR Nano detection work end to end against a real screen, and the labeling page turns a grabbed frame into a named example. Sample evaluation, the crop matcher and project-trained detectors are still ahead; see [the roadmap](docs/03-roadmap.md).
 
 ## The loop
 
@@ -52,6 +52,16 @@ The first build compiles the Rust side and takes a minute or two. After that, fr
 On macOS the first capture run asks for Screen Recording. Grant it to iRecon, then restart the app, or the preview stays black. Windows asks for nothing. A game in exclusive fullscreen is the case that will not work, so run it in borderless windowed.
 
 `npm run build` typechecks and builds the front end without opening the desktop window.
+
+The detector is not in the repository. The Capture lab page downloads it on request, 108 MB once, and checks it against a pinned SHA-256 before anything runs. To fetch it without opening the app:
+
+```bash
+cd src-tauri
+cargo run --example fetch_model
+cargo run --example detect_image -- path/to/photo.jpg
+```
+
+`cargo test` covers preprocessing and the ONNX input and output contract. The contract test skips itself with a message when the model file is not downloaded yet, so a fresh clone still tests clean.
 
 ## Layout
 

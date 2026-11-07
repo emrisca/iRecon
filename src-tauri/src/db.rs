@@ -25,7 +25,39 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             name text not null,
             slug text not null unique,
             created_at text not null
-        );",
+        );
+
+        create table if not exists frame (
+            id integer primary key autoincrement,
+            project_id integer not null references project(id) on delete cascade,
+            path text not null,
+            width integer not null,
+            height integer not null,
+            created_at text not null
+        );
+
+        create table if not exists class (
+            id integer primary key autoincrement,
+            project_id integer not null references project(id) on delete cascade,
+            name text not null,
+            color text not null,
+            threshold real not null default 0.55,
+            unique (project_id, name)
+        );
+
+        create table if not exists example (
+            id integer primary key autoincrement,
+            class_id integer not null references class(id) on delete cascade,
+            path text not null,
+            role text not null default 'positive',
+            origin text not null default 'draw',
+            bbox text,
+            created_at text not null
+        );
+
+        create index if not exists frame_project on frame(project_id);
+        create index if not exists class_project on class(project_id);
+        create index if not exists example_class on example(class_id);",
     )?;
     Ok(conn)
 }
@@ -126,7 +158,7 @@ pub fn project_create(
     drop(conn);
 
     let path = root.join(&slug);
-    for sub in ["examples", "candidates", "sessions", "models"] {
+    for sub in ["frames", "examples", "candidates", "sessions", "models"] {
         std::fs::create_dir_all(path.join(sub)).map_err(|e| e.to_string())?;
     }
 
