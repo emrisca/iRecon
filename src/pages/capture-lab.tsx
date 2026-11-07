@@ -15,7 +15,7 @@ import { Skeleton } from "../components/ui/skeleton";
 import { PageHeader } from "../components/page-header";
 import {
   downloadModel,
-  getModelStatus,
+  getModelCatalog,
   hideOverlay,
   isDesktop,
   listProjects,
@@ -32,8 +32,8 @@ import type {
   CaptureStats,
   DetectionPayload,
   FramePayload,
+  ModelCatalog,
   ModelProgress,
-  ModelStatus,
   Project,
 } from "../lib/types";
 
@@ -46,6 +46,10 @@ function metric(value: string, label: string) {
   );
 }
 
+function megabytes(bytes: number) {
+  return (bytes / 1_000_000).toFixed(0);
+}
+
 export function CaptureLabPage() {
   const [stats, setStats] = useState<CaptureStats | null>(null);
   const [frame, setFrame] = useState<FramePayload | null>(null);
@@ -54,7 +58,7 @@ export function CaptureLabPage() {
   const [overlay, setOverlay] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [model, setModel] = useState<ModelStatus | null>(null);
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [progress, setProgress] = useState<ModelProgress | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
@@ -79,14 +83,14 @@ export function CaptureLabPage() {
         if (!alive) return;
         setProgress(next);
         if (next.phase === "ready" || next.phase === "loaded" || next.phase === "failed") {
-          void getModelStatus().then((status) => {
-            if (alive) setModel(status);
+          void getModelCatalog().then((status) => {
+            if (alive) setCatalog(status);
           });
         }
       });
       cleanups.push(offStats, offFrame, offDetections, offModel);
-      const status = await getModelStatus();
-      if (alive) setModel(status);
+      const status = await getModelCatalog();
+      if (alive) setCatalog(status);
     })();
 
     return () => {
@@ -145,16 +149,17 @@ export function CaptureLabPage() {
     }
   }
 
-  async function startDownload() {
+  async function startDownload(id: string) {
     setBusy(true);
     setError(null);
     try {
-      await downloadModel();
+      await downloadModel(id);
       setProgress({
+        id,
         downloaded: 0,
-        total: model?.expectedBytes ?? 0,
+        total: 0,
         phase: "downloading",
-        message: "Starting the download",
+        message: "",
       });
     } catch (reason) {
       setError(String(reason));
@@ -163,11 +168,11 @@ export function CaptureLabPage() {
     }
   }
 
-  async function load() {
+  async function load(id: string) {
     setBusy(true);
     setError(null);
     try {
-      await loadModel();
+      await loadModel(id);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -176,12 +181,7 @@ export function CaptureLabPage() {
   }
 
   const resolution = stats && stats.width > 0 ? `${stats.width} by ${stats.height}` : "none";
-  const megabytes = model ? (model.bytes / 1_000_000).toFixed(0) : "0";
-  const expected = model ? (model.expectedBytes / 1_000_000).toFixed(0) : "115";
-  const percent =
-    progress && progress.total > 0
-      ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
-      : 0;
+  const activeName = catalog?.models.find((entry) => entry.active)?.name;
 
   return (
     <div className="flex min-h-full flex-col">
@@ -300,58 +300,105 @@ export function CaptureLabPage() {
         <Card>
           <CardHeader className="flex flex-row items-start justify-between gap-2">
             <div className="flex flex-col gap-1.5">
-              <CardTitle>Model</CardTitle>
+              <CardTitle>Models</CardTitle>
               <CardDescription>
-                RF-DETR Nano, Apache 2.0. Downloaded once, checked against a pinned
-                SHA-256 on every load, and never uploaded anywhere.
+                Two RF-DETR sizes, both Apache 2.0. A download is checked against a
+                pinned SHA-256 before it is loaded, stays on this machine, and is never
+                uploaded anywhere.
               </CardDescription>
             </div>
-            <Badge variant={model?.loaded ? "default" : "outline"}>
-              {model?.loaded ? "loaded" : model?.installed ? "on disk" : "missing"}
+            <Badge variant={activeName ? "default" : "outline"}>
+              {activeName ?? "none loaded"}
             </Badge>
           </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap items-center gap-2">
-              {!model?.installed ? (
-                <Button size="sm" className="gap-1.5" disabled={busy} onClick={startDownload}>
-                  <Download className="size-4" aria-hidden="true" />
-                  Download model
-                </Button>
-              ) : (
-                <Button size="sm" variant="outline" disabled={busy || model.loaded} onClick={load}>
-                  Load model
-                </Button>
-              )}
-              <span className="text-xs text-muted-foreground tabular-nums">
-                {model?.installed ? `${megabytes} MB on disk` : `${expected} MB download`}
-              </span>
-              {model?.installed ? (
-                <Badge variant={model.verified ? "secondary" : "destructive"}>
-                  {model.verified ? "hash verified" : "hash mismatch"}
-                </Badge>
-              ) : null}
-            </div>
+          <CardContent className="flex flex-col gap-2">
+            {!isDesktop ? (
+              <p className="text-sm text-muted-foreground">
+                Model downloads need the desktop app.
+              </p>
+            ) : null}
 
-            {progress && progress.phase === "downloading" ? (
-              <div className="flex flex-col gap-1.5">
-                <div className="h-1 w-full overflow-hidden rounded-sm bg-muted">
-                  <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
-                </div>
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  {percent}% of {expected} MB
-                </span>
-              </div>
+            {catalog ? (
+              catalog.models.map((entry) => {
+                const rowProgress = progress?.id === entry.id ? progress : null;
+                const rowPercent =
+                  rowProgress && rowProgress.total > 0
+                    ? Math.min(
+                        100,
+                        Math.round((rowProgress.downloaded / rowProgress.total) * 100)
+                      )
+                    : 0;
+                return (
+                  <div
+                    key={entry.id}
+                    className="flex flex-col gap-1.5 rounded-lg border border-border p-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium">{entry.name}</span>
+                      <Badge variant={entry.active ? "default" : "outline"}>
+                        {entry.active
+                          ? "loaded"
+                          : entry.verified
+                            ? "on disk"
+                            : entry.installed
+                              ? "hash mismatch"
+                              : "missing"}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground tabular-nums">
+                        {entry.inputSize} px,{" "}
+                        {entry.installed
+                          ? `${megabytes(entry.bytes)} MB on disk`
+                          : `${megabytes(entry.expectedBytes)} MB download`}
+                      </span>
+                      <div className="ml-auto">
+                        {entry.verified ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busy || entry.active}
+                            onClick={() => load(entry.id)}
+                          >
+                            Load
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            className="gap-1.5"
+                            disabled={busy}
+                            onClick={() => startDownload(entry.id)}
+                          >
+                            <Download className="size-4" aria-hidden="true" />
+                            Download
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    <span className="text-xs text-muted-foreground">{entry.note}</span>
+                    {rowProgress && rowProgress.phase === "downloading" ? (
+                      <div className="flex flex-col gap-1.5">
+                        <div className="h-1 w-full overflow-hidden rounded-sm bg-muted">
+                          <div
+                            className="h-full bg-primary"
+                            style={{ width: `${rowPercent}%` }}
+                          />
+                        </div>
+                        <span className="text-xs text-muted-foreground tabular-nums">
+                          {rowPercent}% of {megabytes(rowProgress.total)} MB
+                        </span>
+                      </div>
+                    ) : null}
+                    {entry.detail ? (
+                      <span className="text-xs text-destructive">{entry.detail}</span>
+                    ) : null}
+                  </div>
+                );
+              })
+            ) : isDesktop ? (
+              <Skeleton className="h-16 w-full" />
             ) : null}
 
             {progress && progress.message ? (
               <p className="text-xs text-muted-foreground">{progress.message}</p>
-            ) : null}
-
-            {model ? (
-              <p className="break-all text-xs text-muted-foreground">{model.path}</p>
-            ) : null}
-            {model?.detail ? (
-              <p className="text-xs text-destructive">{model.detail}</p>
             ) : null}
           </CardContent>
         </Card>
@@ -382,13 +429,14 @@ export function CaptureLabPage() {
         </Card>
 
         <Card>
-          <CardHeader>              <CardTitle>What this build does not do yet</CardTitle>
-              <CardDescription>
-                Boxes are the shipped detector's proposals, kept only when a class in the
-                selected project scores above that class's threshold. Each box keeps a track
-                id while it overlaps from frame to frame, and a single missed frame no longer
-                blanks it. The capture source is always the primary display.
-              </CardDescription>
+          <CardHeader>
+            <CardTitle>What this build does not do yet</CardTitle>
+            <CardDescription>
+              Boxes are the loaded model's proposals, kept only when a class in the
+              selected project scores above that class's threshold. Each box keeps a track
+              id while it overlaps from frame to frame, and a single missed frame no longer
+              blanks it. The capture source is always the primary display.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             <Separator />
@@ -411,7 +459,8 @@ export function CaptureLabPage() {
                 <span className="mt-2 size-1 shrink-0 rounded-full bg-muted-foreground" />
                 <span>
                   Detection runs every frame on the CPU by default. The inference number
-                  above is the real cost on this machine, which is what Phase 0 asked for.
+                  above is the real cost on this machine, and it is the number to compare
+                  between the two model sizes.
                 </span>
               </li>
             </ul>

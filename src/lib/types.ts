@@ -82,18 +82,28 @@ export type ExampleView = {
 };
 
 export type ModelStatus = {
+  id: string;
+  name: string;
+  note: string;
   path: string;
   installed: boolean;
   verified: boolean;
   bytes: number;
   expectedBytes: number;
   expectedSha: string;
+  inputSize: number;
   url: string;
-  loaded: boolean;
+  active: boolean;
   detail: string | null;
 };
 
+export type ModelCatalog = {
+  active: string | null;
+  models: ModelStatus[];
+};
+
 export type ModelProgress = {
+  id: string;
   downloaded: number;
   total: number;
   phase: "downloading" | "ready" | "loaded" | "failed" | string;

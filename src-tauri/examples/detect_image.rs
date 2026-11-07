@@ -1,11 +1,13 @@
 //! Run the detector on one image and print what it found.
 //!
 //! cargo run --example detect_image -- path/to/image.jpg
+//! cargo run --example detect_image -- path/to/image.jpg path/to/model.onnx
 
 use std::env;
 use std::path::PathBuf;
 
-use irecon_lib::detector::Detector;
+use irecon_lib::detector::{Detector, FALLBACK_INPUT_SIZE};
+use irecon_lib::model;
 
 fn main() -> Result<(), String> {
     let mut args = env::args().skip(1);
@@ -19,12 +21,20 @@ fn main() -> Result<(), String> {
         }
     };
 
+    let input_size = match model::spec_for_file(&model_path) {
+        Some(entry) => entry.input_size,
+        None => {
+            println!("not a pinned model, assuming {FALLBACK_INPUT_SIZE} px");
+            FALLBACK_INPUT_SIZE
+        }
+    };
+
     let image = image::open(&image_path)
         .map_err(|e| format!("Could not open {image_path}: {e}"))?
         .to_rgba8();
     let (width, height) = (image.width(), image.height());
 
-    let mut detector = Detector::load(&model_path)?;
+    let mut detector = Detector::load(&model_path, input_size)?;
     println!("{}", detector.describe());
 
     let (boxes, elapsed) = detector.analyse(image.as_raw(), width, height, 0.35)?;

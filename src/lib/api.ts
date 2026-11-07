@@ -10,8 +10,8 @@ import type {
   FramePayload,
   FrameView,
   LabelClass,
+  ModelCatalog,
   ModelProgress,
-  ModelStatus,
   Project,
 } from "./types";
 
@@ -146,19 +146,19 @@ export async function hideOverlay(): Promise<void> {
   await invoke("overlay_hide");
 }
 
-export async function getModelStatus(): Promise<ModelStatus | null> {
+export async function getModelCatalog(): Promise<ModelCatalog | null> {
   if (!isDesktop) return null;
-  return invoke<ModelStatus>("model_status");
+  return invoke<ModelCatalog>("model_catalog");
 }
 
-export async function downloadModel(): Promise<void> {
+export async function downloadModel(id: string): Promise<void> {
   if (!isDesktop) throw new Error("Downloads need the desktop app");
-  await invoke("model_download");
+  await invoke("model_download", { id });
 }
 
-export async function loadModel(): Promise<void> {
+export async function loadModel(id: string): Promise<void> {
   if (!isDesktop) throw new Error("Loading a model needs the desktop app");
-  await invoke("model_load");
+  await invoke("model_load", { id });
 }
 
 export async function onStats(
@@ -213,10 +213,10 @@ export async function exportDataset(projectId: number): Promise<DatasetExport> {
   if (!isDesktop) {
     return {
       path: "preview/export",
-      frames: 0,
-      boxes: 0,
-      classes: 0,
-      crops: 0,
+      frames: boxes > 0 ? 1 : 0,
+      boxes,
+      classes: rows.length,
+      crops: boxes,
       skipped: 0,
     };
   }

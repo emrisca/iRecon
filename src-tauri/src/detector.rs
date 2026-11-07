@@ -25,10 +25,11 @@ fn environment() -> Result<&'static Environment, String> {
         .ok_or_else(|| "The ONNX Runtime environment could not be stored".to_string())
 }
 
-/// The exported graph's input contract: name, static shape, RGB, plain stretch
-/// resize to 384, divided by 255, then ImageNet mean and standard deviation.
+/// The exported graph's input contract: name, static square shape, RGB, plain
+/// stretch resize, divided by 255, then ImageNet mean and standard deviation.
 pub const INPUT_NAME: &str = "input";
-pub const INPUT_SIZE: u32 = 384;
+/// Used only when a file is not one of the pinned catalog entries.
+pub const FALLBACK_INPUT_SIZE: u32 = 384;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
@@ -142,10 +143,16 @@ pub struct Detector {
     session: Session,
     queries: usize,
     slots: usize,
+    input_size: u32,
 }
 
 impl Detector {
-    pub fn load(path: &Path) -> Result<Self, String> {
+    /// `input_size` comes from the pinned catalog entry, because the graph
+    /// refuses a tensor that is not its own static size.
+    pub fn load(path: &Path, input_size: u32) -> Result<Self, String> {
+        if input_size < 32 {
+            return Err(format!("A {input_size} px input is too small to run"));
+        }
         let mut session = Session::builder(environment()?)
             .map_err(|e| e.to_string())?
             .commit_from_file(path)
@@ -176,19 +183,24 @@ impl Detector {
         }
 
         // Sizes come from the graph, not from an assumption about the export.
-        let (queries, slots) = probe(&mut session)?;
+        let (queries, slots) = probe(&mut session, input_size)?;
         Ok(Detector {
             session,
             queries,
             slots,
+            input_size,
         })
     }
 
     pub fn describe(&self) -> String {
         format!(
-            "RF-DETR Nano, {} px, {} queries, {} class slots",
-            INPUT_SIZE, self.queries, self.slots
+            "{} px input, {} queries, {} class slots",
+            self.input_size, self.queries, self.slots
         )
+    }
+
+    pub fn input_size(&self) -> u32 {
+        self.input_size
     }
 
     pub fn queries(&self) -> usize {
@@ -207,9 +219,10 @@ impl Detector {
         height: u32,
         threshold: f32,
     ) -> Result<(Vec<Detection>, f32), String> {
-        let data = preprocess(rgba, width, height, INPUT_SIZE);
+        let size = self.input_size;
+        let data = preprocess(rgba, width, height, size);
         let tensor = Tensor::from_array((
-            [1usize, 3, INPUT_SIZE as usize, INPUT_SIZE as usize],
+            [1usize, 3, size as usize, size as usize],
             data.into_boxed_slice(),
         ))
         .map_err(|e| e.to_string())?;
@@ -296,10 +309,10 @@ impl Detector {
     }
 }
 
-fn probe(session: &mut Session) -> Result<(usize, usize), String> {
-    let zeros = vec![0f32; 3 * (INPUT_SIZE * INPUT_SIZE) as usize];
+fn probe(session: &mut Session, input_size: u32) -> Result<(usize, usize), String> {
+    let zeros = vec![0f32; 3 * (input_size * input_size) as usize];
     let tensor = Tensor::from_array((
-        [1usize, 3, INPUT_SIZE as usize, INPUT_SIZE as usize],
+        [1usize, 3, input_size as usize, input_size as usize],
         zeros.into_boxed_slice(),
     ))
     .map_err(|e| e.to_string())?;
@@ -439,13 +452,14 @@ mod tests {
             return;
         };
 
-        let mut detector = Detector::load(&path).expect("the model should load");
-        assert_eq!(detector.queries(), 300, "RF-DETR Nano exposes 300 queries");
+        let mut detector = Detector::load(&path, FALLBACK_INPUT_SIZE).expect("the model should load");
+        assert_eq!(detector.queries(), 300, "RF-DETR exposes 300 queries");
         assert_eq!(detector.slots(), 91, "COCO-91 logits, background at slot 0");
 
-        let blank = vec![128u8; INPUT_SIZE as usize * INPUT_SIZE as usize * 4];
+        let size = detector.input_size();
+        let blank = vec![128u8; size as usize * size as usize * 4];
         let (boxes, elapsed) = detector
-            .analyse(&blank, INPUT_SIZE, INPUT_SIZE, 0.3)
+            .analyse(&blank, size, size, 0.3)
             .expect("inference should run");
         assert!(elapsed >= 0.0);
         for detection in &boxes {

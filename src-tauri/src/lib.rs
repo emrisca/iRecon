@@ -19,6 +19,7 @@ pub struct AppState {
     pub capture: Mutex<Option<capture::CaptureHandle>>,
     pub stats: Arc<Mutex<Option<capture::CaptureStats>>>,
     pub detector: Arc<Mutex<Option<detector::Detector>>>,
+    pub loaded_model: Arc<Mutex<Option<String>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -33,16 +34,14 @@ pub fn run() {
                 capture: Mutex::new(None),
                 stats: Arc::new(Mutex::new(None)),
                 detector: Arc::new(Mutex::new(None)),
+                loaded_model: Arc::new(Mutex::new(None)),
             });
 
             // Load a verified model in the background so the window opens immediately.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                let present = model::model_path(&handle)
-                    .map(|path| path.exists())
-                    .unwrap_or(false);
-                if present {
-                    let _ = model::load_now(&handle);
+                if let Some(entry) = model::preferred(&handle) {
+                    let _ = model::load_now(&handle, entry);
                 }
             });
 
@@ -64,7 +63,7 @@ pub fn run() {
             dataset::dataset_export,
             agent::agent_snapshot,
             agent::agent_act,
-            model::model_status,
+            model::model_catalog,
             model::model_download,
             model::model_load,
             capture::capture_start,

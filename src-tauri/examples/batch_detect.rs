@@ -109,18 +109,22 @@ fn main() -> Result<(), String> {
     }
 
     let (digest, model_bytes) = model::sha256_file(&model_path)?;
-    if digest != model::MODEL_SHA256 {
-        return Err(format!(
-            "{} is not the pinned model ({} bytes, sha256 {digest}).",
-            model_path.display(),
-            model_bytes
-        ));
-    }
+    let entry = model::CATALOG
+        .iter()
+        .find(|entry| entry.sha256 == digest)
+        .ok_or_else(|| {
+            format!(
+                "{} is not a pinned model ({} bytes, sha256 {digest}).",
+                model_path.display(),
+                model_bytes
+            )
+        })?;
 
-    let mut detector = Detector::load(&model_path)?;
+    let mut detector = Detector::load(&model_path, entry.input_size)?;
     println!("{}", detector.describe());
     println!(
-        "model {} MB, hash verified, threshold {threshold:.2}",
+        "{} ({} MB, hash verified), threshold {threshold:.2}",
+        entry.name,
         model_bytes / 1_000_000
     );
     println!("{} frames in {}", frames.len(), input.display());

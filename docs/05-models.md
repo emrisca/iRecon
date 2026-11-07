@@ -48,21 +48,24 @@ A wrong mean or a swapped channel order produces boxes that look plausible and a
 
 If a future export changes resolution or names, the loader fails loudly instead of silently misreading the output.
 
-## Where the file lives
+## Where the files live
 
-`models/rf-detr-nano.onnx` under the app data directory, downloaded on first request from the Model card on the Capture lab page. The expected SHA-256 is recorded in the app and checked again on load; a model that fails the hash is refused rather than run, and a partial download is deleted rather than resumed.
+Each model lands as its own file under `models/` in the app data directory, downloaded per row from the Models card on the Capture lab page. The expected SHA-256 is recorded in the app and checked again on load; a model that fails the hash is refused rather than run, and a partial download is deleted rather than resumed. The last model loaded is written to `models/active.txt`, so the next start loads the same size instead of guessing.
 
-The pinned artifact, an unofficial Apache-2.0 conversion of the unmodified COCO weights:
+Both pins are unofficial Apache-2.0 conversions of the unmodified COCO weights, and both share the output contract below. They differ in input size, file size and speed:
 
-| Field | Value |
-| --- | --- |
-| URL | `https://huggingface.co/open-noodle/rfdetr-nano/resolve/main/detection/model.onnx` |
-| Bytes | 107,835,234 |
-| SHA-256 | `21045851f3906c7d424874363fe933477fda7210bad0d7a69659fb98f8845890` |
+| Model | Input | Bytes | SHA-256 |
+| --- | --- | --- | --- |
+| RF-DETR Nano | 384 | 107,835,234 | `21045851f3906c7d424874363fe933477fda7210bad0d7a69659fb98f8845890` |
+| RF-DETR Small | 512 | 114,448,791 | `31fe724f8d5dbff5d09eb4c2c44d2d4083c086c167aec54e11e694e652307f9b` |
 
-Verified on load: input `input`, outputs `dets` and `labels`, 300 queries, 91 class slots. The first artifact this project pinned went private, which is the reason the URL is a constant beside the hash rather than something fetched from a registry at runtime: a broken source is a one-line change, and nothing unverified is ever executed.
+URLs follow the same shape: `https://huggingface.co/open-noodle/rfdetr-<size>/resolve/main/detection/model.onnx`.
 
-`cargo run --example fetch_model` downloads and verifies without opening the app. `cargo run --example detect_image -- path/to.jpg` prints boxes for one image, which is the quickest way to check a new export before touching the UI.
+Nano is the default because it is the cheapest proposal pass. Small costs more per frame and reads smaller objects, which is the trade to measure on the Windows machine before either becomes the shipping choice. Switching is one click, no reinstall, and the capture loop keeps running: the next frame uses the newly loaded graph.
+
+Verified on load: input `input`, outputs `dets` and `labels`, 300 queries, 91 class slots. The input size is part of the catalog entry, not a constant in the decoder, because a 512 graph refuses a 384 tensor. The first artifact this project pinned went private, which is the reason each URL is a constant beside its hash rather than something fetched from a registry at runtime: a broken source is a one-line change, and nothing unverified is ever executed.
+
+`cargo run --example fetch_model -- rfdetr-small` downloads and verifies without opening the app. `cargo run --example detect_image -- path/to.jpg path/to/model.onnx` prints boxes for one image, which is the quickest way to compare two exports before touching the UI.
 
 Bundling it into the installer is the alternative. It makes the download disappear and the installer about 120 MB larger. Start with the download, revisit at packaging time.
 
