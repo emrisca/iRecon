@@ -6,7 +6,16 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { Crop, Download, Maximize2, Minimize2, Minus, Plus, Trash2 } from "lucide-react";
+import {
+  Crop,
+  Download,
+  Maximize2,
+  Minimize2,
+  Minus,
+  Plus,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -27,10 +36,12 @@ import {
   embedExamples,
   exportDataset,
   grabFrame,
+  isDesktop,
   listClasses,
   listExamples,
   listProjects,
   matchRegion,
+  resetDemoData,
   setClassThreshold,
 } from "../lib/api";
 import type {
@@ -449,6 +460,25 @@ export function LabelPage() {
     return rows;
   }
 
+  async function resetDemo() {
+    setBusy(true);
+    setError(null);
+    try {
+      await resetDemoData();
+      if (projectId) await refreshClasses(projectId);
+      setSelected(null);
+      setExamples([]);
+      setMatches([]);
+      setBox(null);
+      setExportInfo(null);
+      setClassName("");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function grab() {
     if (!projectId) return;
     setBusy(true);
@@ -585,6 +615,18 @@ export function LabelPage() {
               </Button>
             ))
           )}
+          {!isDesktop ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto gap-1.5"
+              disabled={busy}
+              onClick={resetDemo}
+            >
+              <RotateCcw className="size-4" aria-hidden="true" />
+              Reset demo
+            </Button>
+          ) : null}
         </div>
 
         <div className="grid gap-2.5 lg:grid-cols-[1.6fr_1fr]">

@@ -115,6 +115,20 @@ function seedDemoProject() {
 
 seedDemoProject();
 
+/** Put the browser demo back to its seeded classes, examples and thresholds. */
+export async function resetDemoData(): Promise<void> {
+  if (isDesktop) return;
+  if (!demoProjects.some((project) => project.id === demoSeed.id)) {
+    demoProjects = [demoSeed, ...demoProjects];
+  }
+  demoClasses.clear();
+  demoExamples.clear();
+  demoAnchors.clear();
+  demoClassId = 1;
+  demoExampleId = 1;
+  seedDemoProject();
+}
+
 export async function listProjects(): Promise<Project[]> {
   if (!isDesktop) return demoProjects;
   return invoke<Project[]>("projects_list");
