@@ -2,12 +2,17 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
+pub mod agent;
 pub mod capture;
+pub mod dataset;
 pub mod db;
 pub mod detector;
+pub mod grab;
 pub mod label;
+pub mod matcher;
 pub mod model;
 pub mod overlay;
+pub mod tracker;
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
@@ -50,9 +55,15 @@ pub fn run() {
             label::frame_grab,
             label::classes_list,
             label::class_create,
+            label::class_threshold,
             label::class_delete,
             label::example_create,
             label::examples_list,
+            label::match_region,
+            label::examples_embed,
+            dataset::dataset_export,
+            agent::agent_snapshot,
+            agent::agent_act,
             model::model_status,
             model::model_download,
             model::model_load,

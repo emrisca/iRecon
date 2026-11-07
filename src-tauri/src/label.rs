@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,6 +9,7 @@ use rusqlite::params;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+use crate::matcher;
 use crate::AppState;
 
 const PREVIEW_WIDTH: u32 = 1280;
@@ -136,66 +138,10 @@ fn slugify(name: &str) -> String {
     }
 }
 
-/// Hides every iRecon window just long enough to grab the screen underneath,
-/// then restores them even when the capture fails. Each window is hidden by
-/// handle rather than by guessed label, and the capture waits for the window
-/// server to report them hidden instead of trusting a fixed delay.
-fn capture_without_window(app: &AppHandle) -> Result<RgbaImage, String> {
-    let monitor = crate::capture::pick_monitor()?;
-    // Remember which windows were on screen, so a hidden overlay stays hidden
-    // and the main window is the one that gets focus back.
-    let windows: Vec<(tauri::WebviewWindow, bool)> = app
-        .webview_windows()
-        .into_values()
-        .map(|window| {
-            let was_visible = window.is_visible().unwrap_or(false);
-            (window, was_visible)
-        })
-        .collect();
-
-    let shown: Vec<&tauri::WebviewWindow> = windows
-        .iter()
-        .filter(|(_, was_visible)| *was_visible)
-        .map(|(window, _)| window)
-        .collect();
-
-    for window in &shown {
-        if let Err(error) = window.hide() {
-            return Err(format!("Could not hide the window for the grab: {error}"));
-        }
-    }
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
-    while std::time::Instant::now() < deadline {
-        if shown
-            .iter()
-            .all(|window| !window.is_visible().unwrap_or(true))
-        {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-
-    // One more compositor frame so the hidden window is really gone from the
-    // display before it is read back.
-    std::thread::sleep(std::time::Duration::from_millis(150));
-
-    let captured = monitor.capture_image();
-
-    for window in &shown {
-        let _ = window.show();
-    }
-    if let Some((window, _)) = windows.iter().find(|(window, _)| window.label() == "main") {
-        let _ = window.set_focus();
-    }
-
-    captured.map_err(|e| format!("Could not capture the screen: {e}"))
-}
-
 #[tauri::command]
 pub fn frame_grab(app: AppHandle, project_id: i64) -> Result<FrameView, String> {
     let (_slug, folder) = project_folder(&app, project_id)?;
-    let image = capture_without_window(&app)?;
+    let image = crate::grab::grab(&app)?;
 
     let stamp = now_millis();
     let path = folder.join("frames").join(format!("{stamp}.png"));
@@ -307,7 +253,7 @@ pub fn class_create(app: AppHandle, project_id: i64, name: String) -> Result<Cla
     let color = PALETTE[(count as usize) % PALETTE.len()].to_string();
 
     conn.execute(
-        "insert into class (project_id, name, color, threshold) values (?1, ?2, ?3, 0.55)",
+        "insert into class (project_id, name, color, threshold) values (?1, ?2, ?3, 0.85)",
         params![project_id, name, color],
     )
     .map_err(|e| e.to_string())?;
@@ -317,9 +263,39 @@ pub fn class_create(app: AppHandle, project_id: i64, name: String) -> Result<Cla
         id,
         name,
         color,
-        threshold: 0.55,
+        threshold: 0.85,
         examples: 0,
     })
+}
+
+#[tauri::command]
+pub fn class_threshold(app: AppHandle, id: i64, threshold: f32) -> Result<ClassView, String> {
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err("A threshold goes from 0 to 1".into());
+    }
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "update class set threshold = ?1 where id = ?2",
+        params![threshold, id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.query_row(
+        "select c.id, c.name, c.color, c.threshold,
+                (select count(*) from example e where e.class_id = c.id)
+         from class c where c.id = ?1",
+        params![id],
+        |row| {
+            Ok(ClassView {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                color: row.get(2)?,
+                threshold: row.get(3)?,
+                examples: row.get(4)?,
+            })
+        },
+    )
+    .map_err(|_| "That class no longer exists".to_string())
 }
 
 #[tauri::command]
@@ -408,11 +384,20 @@ pub fn example_create(
         x, y, w, h
     );
 
+    let embedding = matcher::embed(&crop);
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "insert into example (class_id, path, role, origin, bbox, created_at)
-         values (?1, ?2, 'positive', 'draw', ?3, datetime('now'))",
-        params![class_id, path.to_string_lossy().to_string(), bbox],
+        "insert into example
+           (class_id, frame_id, path, role, origin, bbox, embedding, embedding_model, created_at)
+         values (?1, ?2, ?3, 'positive', 'draw', ?4, ?5, ?6, datetime('now'))",
+        params![
+            class_id,
+            frame_id,
+            path.to_string_lossy().to_string(),
+            bbox,
+            matcher::to_blob(&embedding),
+            matcher::EMBEDDING_MODEL
+        ],
     )
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
@@ -481,4 +466,140 @@ pub fn examples_list(app: AppHandle, class_id: i64) -> Result<Vec<ExampleView>, 
         });
     }
     Ok(examples)
+}
+
+/// Ranks the project's classes against one box in a stored frame.
+#[tauri::command]
+pub fn match_region(
+    app: AppHandle,
+    project_id: i64,
+    frame_id: i64,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Result<Vec<matcher::ClassMatch>, String> {
+    let state = app.state::<AppState>();
+    let (frame_path, names, entries) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let frame_path: String = conn
+            .query_row(
+                "select path from frame where id = ?1 and project_id = ?2",
+                params![frame_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "That frame is gone".to_string())?;
+
+        let mut names = HashMap::new();
+        {
+            let mut statement = conn
+                .prepare("select id, name from class where project_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map(params![project_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (id, name) = row.map_err(|e| e.to_string())?;
+                names.insert(id, name);
+            }
+        }
+
+        let mut entries = Vec::new();
+        {
+            let mut statement = conn
+                .prepare(
+                    "select e.id, e.class_id, e.role, e.embedding
+                     from example e join class c on c.id = e.class_id
+                     where c.project_id = ?1 and e.embedding is not null
+                       and e.embedding_model = ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map(params![project_id, matcher::EMBEDDING_MODEL], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (example_id, class_id, role, blob) = row.map_err(|e| e.to_string())?;
+                if let Some(embedding) = matcher::from_blob(&blob) {
+                    entries.push(matcher::PoolEntry {
+                        example_id,
+                        class_id,
+                        role,
+                        embedding,
+                    });
+                }
+            }
+        }
+        (frame_path, names, entries)
+    };
+
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let source = image::open(&frame_path).map_err(|e| format!("Could not open the frame: {e}"))?;
+    let source = source.to_rgba8();
+    let (width, height) = (source.width(), source.height());
+    let x0 = ((x.clamp(0.0, 1.0) * width as f32).round() as u32).min(width.saturating_sub(1));
+    let y0 = ((y.clamp(0.0, 1.0) * height as f32).round() as u32).min(height.saturating_sub(1));
+    let x1 = (((x + w).clamp(0.0, 1.0) * width as f32).round() as u32).min(width);
+    let y1 = (((y + h).clamp(0.0, 1.0) * height as f32).round() as u32).min(height);
+    if x1 <= x0 || y1 <= y0 {
+        return Err("Drag a box that has some area to it".into());
+    }
+
+    let crop = image::imageops::crop_imm(&source, x0, y0, x1 - x0, y1 - y0).to_image();
+    let candidate = matcher::embed(&crop);
+    Ok(matcher::rank(&candidate, &entries, &names))
+}
+
+/// Fills in fingerprints for examples saved before the matcher existed, or by
+/// an older fingerprint version. Returns how many were written.
+#[tauri::command]
+pub fn examples_embed(app: AppHandle, project_id: i64) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let pending: Vec<(i64, String)> = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut statement = conn
+            .prepare(
+                "select e.id, e.path from example e join class c on c.id = e.class_id
+                 where c.project_id = ?1
+                   and (e.embedding is null or e.embedding_model is not ?2)",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map(params![project_id, matcher::EMBEDDING_MODEL], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut pending = Vec::new();
+        for row in rows {
+            pending.push(row.map_err(|e| e.to_string())?);
+        }
+        pending
+    };
+
+    let mut embedded = 0usize;
+    for (id, path) in pending {
+        let Ok(image) = image::open(&path) else {
+            continue;
+        };
+        let embedding = matcher::embed(&image.to_rgba8());
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "update example set embedding = ?1, embedding_model = ?2 where id = ?3",
+            params![matcher::to_blob(&embedding), matcher::EMBEDDING_MODEL, id],
+        )
+        .map_err(|e| e.to_string())?;
+        embedded += 1;
+    }
+    Ok(embedded)
 }

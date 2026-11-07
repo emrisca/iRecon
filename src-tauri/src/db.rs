@@ -16,6 +16,27 @@ pub struct Project {
     pub path: String,
 }
 
+/// Adds a column to an existing database without a migration table. SQLite has
+/// no `add column if not exists`, so the table is inspected first.
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare(&format!("pragma table_info({table})"))?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if !names.iter().any(|name| name == column) {
+        conn.execute_batch(&format!(
+            "alter table {table} add column {column} {definition}"
+        ))?;
+    }
+    Ok(())
+}
+
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -41,7 +62,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             project_id integer not null references project(id) on delete cascade,
             name text not null,
             color text not null,
-            threshold real not null default 0.55,
+            threshold real not null default 0.85,
             unique (project_id, name)
         );
 
@@ -59,6 +80,18 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         create index if not exists class_project on class(project_id);
         create index if not exists example_class on example(class_id);",
     )?;
+
+    // Added after the first schema: the source frame and the fingerprint that
+    // makes an example matchable. Existing rows keep nulls until re-embedded.
+    ensure_column(&conn, "example", "frame_id", "integer")?;
+    ensure_column(&conn, "example", "embedding", "blob")?;
+    ensure_column(&conn, "example", "embedding_model", "text")?;
+    conn.execute_batch("create index if not exists example_frame on example(frame_id);")?;
+
+    // Classes created before thresholds were measured still carry the old
+    // 0.55 default, which accepted every unknown crop in the benchmark. Lift
+    // only that exact value, so a threshold chosen on purpose survives.
+    conn.execute_batch("update class set threshold = 0.85 where threshold = 0.55;")?;
     Ok(conn)
 }
 

@@ -5,10 +5,12 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use xcap::Monitor;
 
 use crate::detector::Detection;
+use crate::matcher;
+use crate::tracker::{TrackedBox, Tracker};
 use crate::AppState;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -28,6 +30,8 @@ pub struct CaptureStats {
     pub capture_ms: f32,
     pub inference_ms: f32,
     pub detections: u32,
+    pub pool_classes: u32,
+    pub pool_examples: u32,
     pub frames: u64,
     pub errors: u64,
     pub elapsed_s: f32,
@@ -49,7 +53,7 @@ pub struct DetectionPayload {
     pub width: u32,
     pub height: u32,
     pub inference_ms: f32,
-    pub boxes: Vec<Detection>,
+    pub boxes: Vec<TrackedBox>,
 }
 
 pub struct CaptureHandle {
@@ -74,7 +78,11 @@ pub fn capture_status(state: tauri::State<'_, AppState>) -> Option<CaptureStats>
 }
 
 #[tauri::command]
-pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub fn capture_start(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    project_id: Option<i64>,
+) -> Result<(), String> {
     let mut slot = state.capture.lock().map_err(|e| e.to_string())?;
     if slot.is_some() {
         return Ok(());
@@ -87,6 +95,19 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
+
+    // The pool belongs to one project. With no explicit choice, the most
+    // recently created project is the one being labelled.
+    let project = project_id.or_else(|| {
+        state.db.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "select id from project order by created_at desc, id desc limit 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+        })
+    });
     let stats = state.stats.clone();
     let detector = state.detector.clone();
     let app_handle = app.clone();
@@ -106,9 +127,32 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
             let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
             let mut window_frames: u64 = 0;
             let mut window_cost = Duration::ZERO;
+            let mut pool = matcher::Pool::default();
+            let mut pool_at = Instant::now() - Duration::from_secs(5);
+            let mut tracker = Tracker::new();
 
             while !stop_thread.load(Ordering::Relaxed) {
                 let tick = Instant::now();
+
+                // Reload on a slow tick, so a new example starts scoring without
+                // restarting the capture thread.
+                if pool_at.elapsed() >= Duration::from_secs(2) {
+                    pool_at = Instant::now();
+                    if let Some(id) = project {
+                        let owned = app_handle.state::<AppState>();
+                        let guard = owned.db.lock();
+                        let loaded = match guard.as_ref() {
+                            Ok(conn) => matcher::load_pool(conn, id),
+                            Err(error) => Err(error.to_string()),
+                        };
+                        drop(guard);
+                        drop(owned);
+                        match loaded {
+                            Ok(next) => pool = next,
+                            Err(error) => note = Some(error),
+                        }
+                    }
+                }
 
                 match monitor.capture_image() {
                     Ok(image) => {
@@ -143,14 +187,43 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
                                 ) {
                                     Ok((boxes, elapsed)) => {
                                         inference_ms = elapsed;
-                                        detections = boxes.len() as u32;
+                                        // Every proposal is cropped from the full frame and
+                                        // scored against the project pool. A class with no
+                                        // examples cannot match, so an empty project draws
+                                        // nothing rather than unlabelled guesses.
+                                        let matched: Vec<Detection> = boxes
+                                            .into_iter()
+                                            .filter_map(|detection| {
+                                                let crop = crop_region(
+                                                    image.as_raw(),
+                                                    image.width(),
+                                                    image.height(),
+                                                    &detection,
+                                                )?;
+                                                let candidate = matcher::embed(&crop);
+                                                let hit = pool.classify(&candidate)?;
+                                                Some(Detection {
+                                                    label: hit.name,
+                                                    score: hit.score,
+                                                    ..detection
+                                                })
+                                            })
+                                            .collect();
+                                        let tracked = tracker.update(matched);
+                                        detections = tracked.len() as u32;
+                                        if pool.examples == 0 && note.is_none() {
+                                            note = Some(
+                                                "No examples in this project yet, so no proposal can match a class."
+                                                    .to_string(),
+                                            );
+                                        }
                                         let _ = app_handle.emit(
                                             "spike:detections",
                                             DetectionPayload {
                                                 width: image.width(),
                                                 height: image.height(),
                                                 inference_ms: elapsed,
-                                                boxes,
+                                                boxes: tracked,
                                             },
                                         );
                                     }
@@ -191,6 +264,8 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
                         },
                         inference_ms,
                         detections,
+                        pool_classes: pool.classes.len() as u32,
+                        pool_examples: pool.examples as u32,
                         frames,
                         errors,
                         elapsed_s: started.elapsed().as_secs_f32(),
@@ -221,6 +296,8 @@ pub fn capture_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Resul
                 capture_ms: 0.0,
                 inference_ms,
                 detections: 0,
+                pool_classes: pool.classes.len() as u32,
+                pool_examples: pool.examples as u32,
                 frames,
                 errors,
                 elapsed_s: started.elapsed().as_secs_f32(),
@@ -251,6 +328,42 @@ pub fn capture_stop(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
         }
     }
     Ok(())
+}
+
+/// Crops a normalized detection out of a raw RGBA frame.
+fn crop_region(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    detection: &Detection,
+) -> Option<image::RgbaImage> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let x0 = ((detection.x.clamp(0.0, 1.0) * width as f32).round() as u32).min(width - 1);
+    let y0 = ((detection.y.clamp(0.0, 1.0) * height as f32).round() as u32).min(height - 1);
+    let x1 = (((detection.x + detection.w).clamp(0.0, 1.0) * width as f32).round() as u32)
+        .min(width);
+    let y1 = (((detection.y + detection.h).clamp(0.0, 1.0) * height as f32).round() as u32)
+        .min(height);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let mut crop = image::RgbaImage::new(x1 - x0, y1 - y0);
+    for y in 0..(y1 - y0) {
+        for x in 0..(x1 - x0) {
+            let source = (((y0 + y) * width + (x0 + x)) * 4) as usize;
+            if source + 3 >= raw.len() {
+                return None;
+            }
+            crop.put_pixel(
+                x,
+                y,
+                image::Rgba([raw[source], raw[source + 1], raw[source + 2], 255]),
+            );
+        }
+    }
+    Some(crop)
 }
 
 /// A spike-only preview encoder. It downsamples the frame by sampling and writes a
