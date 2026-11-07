@@ -25,3 +25,6 @@ sessions/
 .vscode/*
 !.vscode/extensions.json
 *.log
+
+# batch_detect output
+irecon-batch/

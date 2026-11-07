@@ -88,3 +88,5 @@ Run the exported Nano model over 100 frames of recorded gameplay traffic at 384 
 3. Whether a distant car, the case that matters most for traffic awareness, survives the 384 input or needs 512.
 
 If Nano at 384 boxes under half the cars, move to Small at 512 before touching the UI. If both fail, the proposal stage needs a project-trained detector and Phase 5 moves up.
+
+`cargo run --example batch_detect -- path/to/frames` produces the numbers. It verifies the pinned hash, runs every PNG and JPEG in the folder through the model, and writes `frames.csv` (size, boxes, car-like boxes, inference ms, top class), `boxes.csv` (every box with its score and normalised corners) and `classes.csv` (totals per class) into `irecon-batch`. Recall is the one number it cannot produce, because that needs a human count of the objects actually visible; the car-like column is the numerator for it, and the zero-box frames are where the misses are hiding.

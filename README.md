@@ -59,7 +59,10 @@ The detector is not in the repository. The Capture lab page downloads it on requ
 cd src-tauri
 cargo run --example fetch_model
 cargo run --example detect_image -- path/to/photo.jpg
+cargo run --example batch_detect -- path/to/frames
 ```
+
+`batch_detect` walks a folder of frames, runs the pinned model over each one and writes `frames.csv`, `boxes.csv` and `classes.csv` into `irecon-batch`, which is the measurement the detector question in the roadmap asks for.
 
 `cargo test` covers preprocessing and the ONNX input and output contract. The contract test skips itself with a message when the model file is not downloaded yet, so a fresh clone still tests clean.
 
