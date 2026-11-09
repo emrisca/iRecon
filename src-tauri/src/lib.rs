@@ -80,6 +80,7 @@ pub fn run() {
             source::source_crop,
             source::source_delete,
             source::source_preview,
+            source::source_frame,
             review::candidates_list,
             review::candidate_nearest,
             review::candidate_resolve,

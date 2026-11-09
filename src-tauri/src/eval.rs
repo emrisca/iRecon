@@ -7,6 +7,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::capture::crop_region;
+use crate::detector::Detection;
 use crate::matcher;
 use crate::AppState;
 
@@ -20,6 +21,8 @@ pub struct EvalFrame {
     pub matches: usize,
     pub best_score: Option<f32>,
     pub best_class: Option<String>,
+    /// The boxes that cleared their class threshold, ready to draw or report.
+    pub matched_boxes: Vec<Detection>,
 }
 
 #[derive(Clone, Serialize)]
@@ -83,10 +86,15 @@ pub fn evaluate_frames(
         let image = image::open(&path)
             .map_err(|error| format!("Could not open frame {frame_id}: {error}"))?
             .to_rgba8();
-        let (boxes, _) =
-            detector.analyse(image.as_raw(), image.width(), image.height(), 0.35)?;
+        let (boxes, _) = detector.analyse(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            crate::capture::SCORE_THRESHOLD,
+        )?;
 
         let mut matches = 0usize;
+        let mut matched_boxes: Vec<Detection> = Vec::new();
         let mut best_score: Option<f32> = None;
         let mut best_class: Option<String> = None;
         for detection in &boxes {
@@ -103,6 +111,11 @@ pub fn evaluate_frames(
                 }
                 if hit.score >= hit.threshold {
                     matches += 1;
+                    matched_boxes.push(Detection {
+                        label: hit.name,
+                        score: hit.score,
+                        ..detection.clone()
+                    });
                 }
             }
         }
@@ -120,6 +133,7 @@ pub fn evaluate_frames(
             matches,
             best_score,
             best_class,
+            matched_boxes,
         });
     }
 

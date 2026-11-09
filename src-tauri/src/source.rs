@@ -310,6 +310,56 @@ pub fn source_preview(app: AppHandle, id: i64) -> Result<FramePayload, String> {
     })
 }
 
+/// Saves one full-resolution frame from a source into the project's library.
+/// A window source is read through its own handle, so a covered game can be
+/// labelled or evaluated without bringing it to the front.
+#[tauri::command]
+pub fn source_frame(app: AppHandle, project_id: i64, id: i64) -> Result<label::FrameView, String> {
+    let source = source_row(&app, id)?;
+    if source.project_id != project_id {
+        return Err("That source belongs to another project".into());
+    }
+    let image = read_source(&source)?;
+    let (_slug, folder) = label::project_folder(&app, project_id)?;
+    let path = folder
+        .join("frames")
+        .join(format!("{}.png", label::now_millis()));
+    image
+        .save_with_format(&path, image::ImageFormat::Png)
+        .map_err(|error| format!("Could not save the frame: {error}"))?;
+
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "insert into frame (project_id, path, width, height, created_at)
+         values (?1, ?2, ?3, ?4, datetime('now'))",
+        params![
+            project_id,
+            path.to_string_lossy().to_string(),
+            image.width() as i64,
+            image.height() as i64
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let frame_id = conn.last_insert_rowid();
+    let created_at: String = conn
+        .query_row(
+            "select created_at from frame where id = ?1",
+            params![frame_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(label::FrameView {
+        id: frame_id,
+        path: path.to_string_lossy().to_string(),
+        width: image.width(),
+        height: image.height(),
+        preview: label::preview(&image),
+        created_at,
+    })
+}
+
 fn first_image(folder: &Path) -> Result<PathBuf, String> {
     let entries = std::fs::read_dir(folder)
         .map_err(|error| format!("Could not read {}: {error}", folder.display()))?;

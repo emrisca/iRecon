@@ -18,7 +18,10 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const REPORT_INTERVAL: Duration = Duration::from_millis(500);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(800);
 const PREVIEW_WIDTH: u32 = 640;
-const SCORE_THRESHOLD: f32 = 0.35;
+/// The detector's own floor. It sits low on purpose: the matcher decides what
+/// the proposals mean, so a game scene that is not in the detector's vocabulary
+/// still reaches the pool instead of being dropped before it is scored.
+pub(crate) const SCORE_THRESHOLD: f32 = 0.2;
 /// Candidates sit in a band just under their class's own threshold. The band is
 /// a fraction of that threshold rather than a fixed distance, because 0.12 under
 /// 0.9 is a near miss while 0.12 under 0.4 is a different object. The floor and
