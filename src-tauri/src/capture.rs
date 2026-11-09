@@ -19,10 +19,17 @@ const REPORT_INTERVAL: Duration = Duration::from_millis(500);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(800);
 const PREVIEW_WIDTH: u32 = 640;
 const SCORE_THRESHOLD: f32 = 0.35;
-/// How far under a class's threshold a proposal still counts as a candidate.
-/// Wider and the queue fills with junk; narrower and it only sees near misses
-/// that were about to match anyway.
-const HARVEST_BAND: f32 = 0.12;
+/// Candidates sit in a band just under their class's own threshold. The band is
+/// a fraction of that threshold rather than a fixed distance, because 0.12 under
+/// 0.9 is a near miss while 0.12 under 0.4 is a different object. The floor and
+/// cap keep both ends sane.
+const HARVEST_BAND_FRACTION: f32 = 0.1;
+const HARVEST_BAND_MIN: f32 = 0.04;
+const HARVEST_BAND_MAX: f32 = 0.12;
+
+fn harvest_floor(threshold: f32) -> f32 {
+    threshold - (threshold * HARVEST_BAND_FRACTION).clamp(HARVEST_BAND_MIN, HARVEST_BAND_MAX)
+}
 /// Candidates per capture session, so a bad pool cannot fill the disk.
 const HARVEST_CAP: u32 = 40;
 const HARVEST_INTERVAL: Duration = Duration::from_millis(400);
@@ -38,6 +45,10 @@ pub struct CaptureStats {
     pub capture_ms: f32,
     pub inference_ms: f32,
     pub detections: u32,
+    /// The closest class to this frame's proposals, matched or not, so the
+    /// harvest band can be tuned against what the screen actually scores.
+    pub best_score: Option<f32>,
+    pub best_class: Option<String>,
     pub pool_classes: u32,
     pub pool_examples: u32,
     pub frames: u64,
@@ -138,6 +149,8 @@ pub fn capture_start(
                             capture_ms: 0.0,
                             inference_ms: 0.0,
                             detections: 0,
+                            best_score: None,
+                            best_class: None,
                             pool_classes: 0,
                             pool_examples: 0,
                             frames: 0,
@@ -156,6 +169,8 @@ pub fn capture_start(
             let mut size = (0u32, 0u32);
             let mut inference_ms = 0f32;
             let mut detections = 0u32;
+            let mut best_score: Option<f32> = None;
+            let mut best_class: Option<String> = None;
             let mut model_name: Option<String> = None;
             let started = Instant::now();
             let mut last_report = Instant::now();
@@ -229,6 +244,7 @@ pub fn capture_start(
                                         // scored against the project pool. A class with no
                                         // examples cannot match, so an empty project draws
                                         // nothing rather than unlabelled guesses.
+                                        let mut frame_best: Option<(String, f32)> = None;
                                         let matched: Vec<Detection> = boxes
                                             .into_iter()
                                             .filter_map(|detection| {
@@ -239,10 +255,19 @@ pub fn capture_start(
                                                     &detection,
                                                 )?;
                                                 let candidate = matcher::embed(&crop);
-                                                if let Some(hit) = pool.classify(&candidate) {
+                                                let guess = pool.best(&candidate)?;
+                                                if frame_best
+                                                    .as_ref()
+                                                    .map(|(_, score)| guess.score > *score)
+                                                    .unwrap_or(true)
+                                                {
+                                                    frame_best =
+                                                        Some((guess.name.clone(), guess.score));
+                                                }
+                                                if guess.score >= guess.threshold {
                                                     return Some(Detection {
-                                                        label: hit.name,
-                                                        score: hit.score,
+                                                        label: guess.name,
+                                                        score: guess.score,
                                                         ..detection
                                                     });
                                                 }
@@ -252,31 +277,30 @@ pub fn capture_start(
                                                 // about, so it is saved for review.
                                                 if harvested < HARVEST_CAP
                                                     && last_harvest.elapsed() >= HARVEST_INTERVAL
+                                                    && guess.score
+                                                        >= harvest_floor(guess.threshold)
                                                 {
-                                                    if let Some(guess) = pool.best(&candidate) {
-                                                        if guess.score
-                                                            >= guess.threshold - HARVEST_BAND
-                                                            && guess.score < guess.threshold
-                                                        {
-                                                            if let Some(project) = project {
-                                                                if save_candidate(
-                                                                    &app_handle,
-                                                                    project,
-                                                                    guess.class_id,
-                                                                    guess.score,
-                                                                    &crop,
-                                                                    &mut harvest_root,
-                                                                ) {
-                                                                    harvested += 1;
-                                                                    last_harvest = Instant::now();
-                                                                }
-                                                            }
+                                                    if let Some(project) = project {
+                                                        if save_candidate(
+                                                            &app_handle,
+                                                            project,
+                                                            guess.class_id,
+                                                            guess.score,
+                                                            &crop,
+                                                            &mut harvest_root,
+                                                        ) {
+                                                            harvested += 1;
+                                                            last_harvest = Instant::now();
                                                         }
                                                     }
                                                 }
                                                 None
                                             })
                                             .collect();
+                                        if let Some((name, score)) = frame_best {
+                                            best_class = Some(name);
+                                            best_score = Some(score);
+                                        }
                                         let tracked = tracker.update(matched);
                                         detections = tracked.len() as u32;
                                         if pool.examples == 0 && note.is_none() {
@@ -302,6 +326,8 @@ pub fn capture_start(
                             } else {
                                 model_name = None;
                                 detections = 0;
+                                best_score = None;
+                                best_class = None;
                             }
                         }
                     }
@@ -332,6 +358,8 @@ pub fn capture_start(
                         },
                         inference_ms,
                         detections,
+                        best_score,
+                        best_class: best_class.clone(),
                         pool_classes: pool.classes.len() as u32,
                         pool_examples: pool.examples as u32,
                         frames,
@@ -364,6 +392,8 @@ pub fn capture_start(
                 capture_ms: 0.0,
                 inference_ms,
                 detections: 0,
+                best_score,
+                best_class,
                 pool_classes: pool.classes.len() as u32,
                 pool_examples: pool.examples as u32,
                 frames,
@@ -446,7 +476,7 @@ fn save_candidate(
 }
 
 /// Crops a normalized detection out of a raw RGBA frame.
-fn crop_region(
+pub(crate) fn crop_region(
     raw: &[u8],
     width: u32,
     height: u32,

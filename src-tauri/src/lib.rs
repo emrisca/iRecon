@@ -8,6 +8,7 @@ pub mod capture;
 pub mod dataset;
 pub mod db;
 pub mod detector;
+pub mod eval;
 pub mod grab;
 pub mod label;
 pub mod library;
@@ -82,6 +83,7 @@ pub fn run() {
             review::candidates_list,
             review::candidate_nearest,
             review::candidate_resolve,
+            eval::evaluate_frames,
             dataset::dataset_export,
             agent::agent_snapshot,
             agent::agent_act,
