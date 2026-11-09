@@ -16,14 +16,20 @@ import { PageHeader } from "../components/page-header";
 import {
   downloadModel,
   getModelCatalog,
+  getOverlayState,
   hideOverlay,
   isDesktop,
   listProjects,
+  listSources,
   loadModel,
   onDetections,
   onFrame,
   onModelProgress,
+  onPaint,
   onStats,
+  projectMatchFloor,
+  setCalibration,
+  setProjectMatchFloor,
   showOverlay,
   startCapture,
   stopCapture,
@@ -35,7 +41,10 @@ import type {
   FramePayload,
   ModelCatalog,
   ModelProgress,
+  OverlayState,
+  PaintStats,
   Project,
+  SourceView,
 } from "../lib/types";
 
 function metric(value: string, label: string) {
@@ -56,13 +65,18 @@ export function CaptureLabPage() {
   const [frame, setFrame] = useState<FramePayload | null>(null);
   const [detections, setDetections] = useState<DetectionPayload | null>(null);
   const [running, setRunning] = useState(false);
-  const [overlay, setOverlay] = useState(false);
+  const [overlay, setOverlay] = useState<OverlayState | null>(null);
+  const [paint, setPaint] = useState<PaintStats | null>(null);
   const [busy, setBusy] = useState(false);
+  const [record, setRecord] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [progress, setProgress] = useState<ModelProgress | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
+  const [sources, setSources] = useState<SourceView[]>([]);
+  const [sourceId, setSourceId] = useState<number | null>(null);
+  const [floor, setFloor] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -91,9 +105,14 @@ export function CaptureLabPage() {
           });
         }
       });
-      cleanups.push(offStats, offFrame, offDetections, offModel);
+      const offPaint = await onPaint((next) => {
+        if (alive) setPaint(next);
+      });
+      cleanups.push(offStats, offFrame, offDetections, offModel, offPaint);
       const status = await getModelCatalog();
       if (alive) setCatalog(status);
+      const overlayState = await getOverlayState();
+      if (alive) setOverlay(overlayState);
     })();
 
     return () => {
@@ -117,6 +136,47 @@ export function CaptureLabPage() {
     };
   }, []);
 
+  // Saved sources are optional. Without one, capture reads the primary display,
+  // which is what it did before sources could drive the live loop.
+  useEffect(() => {
+    let alive = true;
+    if (projectId == null) {
+      setSources([]);
+      setSourceId(null);
+      return () => {
+        alive = false;
+      };
+    }
+    listSources(projectId)
+      .then((rows) => {
+        if (!alive) return;
+        setSources(rows);
+        setSourceId((current) => (rows.some((row) => row.id === current) ? current : null));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [projectId]);
+
+  useEffect(() => {
+    let alive = true;
+    if (projectId == null) {
+      setFloor(0);
+      return () => {
+        alive = false;
+      };
+    }
+    projectMatchFloor(projectId)
+      .then((value) => {
+        if (alive) setFloor(value);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [projectId]);
+
   async function toggleCapture() {
     setBusy(true);
     setError(null);
@@ -125,7 +185,7 @@ export function CaptureLabPage() {
         await stopCapture();
         setRunning(false);
       } else {
-        await startCapture(projectId ?? undefined);
+        await startCapture(projectId ?? undefined, record, sourceId);
         setRunning(true);
       }
     } catch (reason) {
@@ -139,13 +199,21 @@ export function CaptureLabPage() {
     setBusy(true);
     setError(null);
     try {
-      if (overlay) {
-        await hideOverlay();
-        setOverlay(false);
-      } else {
-        await showOverlay();
-        setOverlay(true);
-      }
+      const next = overlay?.visible ? await hideOverlay() : await showOverlay();
+      setOverlay(next);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleCalibration() {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await setCalibration(!overlay?.calibration);
+      setOverlay(next);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -181,6 +249,18 @@ export function CaptureLabPage() {
       setError(String(reason));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function changeFloor(percent: number) {
+    const next = Math.min(100, Math.max(0, Math.round(percent)));
+    setFloor(next / 100);
+    if (projectId == null) return;
+    try {
+      const saved = await setProjectMatchFloor(projectId, next / 100);
+      setFloor(saved);
+    } catch (reason) {
+      setError(String(reason));
     }
   }
 
@@ -241,18 +321,98 @@ export function CaptureLabPage() {
             </Button>
           ))
         )}
+        <label className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={record}
+            disabled={running}
+            onChange={(event) => setRecord(event.target.checked)}
+          />
+          Record session
+        </label>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-border p-2.5">
+        <span className="text-xs text-muted-foreground">Source</span>
+        <Button
+          size="sm"
+          variant={sourceId === null ? "secondary" : "ghost"}
+          disabled={running}
+          onClick={() => setSourceId(null)}
+        >
+          Primary display
+        </Button>
+        {sources.map((source) => (
+          <Button
+            key={source.id}
+            size="sm"
+            variant={source.id === sourceId ? "secondary" : "ghost"}
+            disabled={running}
+            title={`${source.kind}: ${source.target}`}
+            onClick={() => setSourceId(source.id)}
+          >
+            {source.label}
+          </Button>
+        ))}
+        {sources.length === 0 ? (
+          <span className="text-xs text-muted-foreground">
+            Add a display, window, file or folder on the project page to replay it here.
+          </span>
+        ) : null}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-border p-2.5">
+        <label
+          htmlFor="match-floor"
+          className="text-xs text-muted-foreground"
+        >
+          Match floor
+        </label>
+        <input
+          id="match-floor"
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={Math.round(floor * 100)}
+          onChange={(event) => void changeFloor(Number(event.target.value))}
+          className="w-40 accent-foreground"
+        />
+        <span className="text-sm tabular-nums">{Math.round(floor * 100)}%</span>
+        <span className="text-xs text-muted-foreground">
+          Boxes and review candidates below this score are dropped.
+        </span>
       </div>
 
       <div className="flex flex-col gap-2.5 p-2.5">
-        <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
           {metric(stats ? stats.fps.toFixed(1) : "0.0", "Frames per second")}
-          {metric(stats ? `${stats.captureMs.toFixed(1)} ms` : "0 ms", "Capture cost")}
+          {metric(stats ? `${stats.frameGapMs.toFixed(1)} ms` : "0 ms", "Frame interval")}
+          {metric(stats ? `${stats.captureP50Ms.toFixed(1)} ms` : "0 ms", "Capture p50")}
+          {metric(stats ? `${stats.captureP95Ms.toFixed(1)} ms` : "0 ms", "Capture p95")}
+          {metric(stats ? `${stats.preprocessMs.toFixed(1)} ms` : "0 ms", "Preprocess")}
           {metric(
             detections ? `${detections.inferenceMs.toFixed(1)} ms` : "0 ms",
             "Inference cost"
           )}
           {metric(stats ? `${stats.matchMs.toFixed(1)} ms` : "0 ms", "Matcher cost")}
-          {metric(detections ? String(detections.boxes.length) : "0", "Detections")}
+          {metric(detections ? `${detections.latencyMs.toFixed(1)} ms` : "0 ms", "Frame to box")}
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <Badge variant="outline">{stats?.backend ?? "idle"}</Badge>
+          <span className="tabular-nums">
+            {stats
+              ? `${stats.dropped} dropped of ${stats.frames} captured`
+              : "no frames yet"}
+          </span>
+          {stats && stats.captureMaxMs > 0 ? (
+            <span className="tabular-nums">worst frame {stats.captureMaxMs.toFixed(1)} ms</span>
+          ) : null}
+          {stats?.width ? (
+            <span className="tabular-nums">
+              {stats.width} by {stats.height}
+            </span>
+          ) : null}
         </div>
 
         <Card>
@@ -417,19 +577,28 @@ export function CaptureLabPage() {
                 boxes never eat a click meant for the app underneath.
               </CardDescription>
             </div>
-            <Badge variant={overlay ? "default" : "outline"}>
-              {overlay ? "visible" : "hidden"}
+            <Badge variant={overlay?.visible ? "default" : "outline"}>
+              {overlay?.visible ? "visible" : "hidden"}
             </Badge>
           </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2">
+          <CardContent className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" variant="outline" disabled={busy} onClick={toggleOverlay}>
-                {overlay ? "Hide overlay" : "Show overlay"}
+                {overlay?.visible ? "Hide overlay" : "Show overlay"}
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={toggleCalibration}>
+                {overlay?.calibration ? "Calibration on" : "Calibration off"}
               </Button>
               <span className="text-xs text-muted-foreground">
-                Draws the last detections. Sample boxes appear only when none arrive.
+                Hotkey {overlay?.hotkey ?? "Ctrl+Alt+O"}, and it works while another window is
+                focused.
               </span>
             </div>
+            <p className="text-xs text-muted-foreground tabular-nums">
+              {paint
+                ? `Paint ${paint.fps.toFixed(1)} fps, ${paint.drawMs.toFixed(2)} ms per frame, ${paint.boxes} boxes${paint.calibration ? ", calibration" : ""}`
+                : "Paint numbers appear once the overlay has drawn a frame."}
+            </p>
           </CardContent>
         </Card>
 
@@ -440,7 +609,8 @@ export function CaptureLabPage() {
               Boxes are the loaded model's proposals, kept only when a class in the
               selected project scores above that class's threshold. Each box keeps a track
               id while it overlaps from frame to frame, and a single missed frame no longer
-              blanks it. The capture source is always the primary display.
+              blanks it. Capture reads a duplication session, so frames arrive without a
+              screenshot per frame; a file or folder source replays at twenty a second.
             </CardDescription>
           </CardHeader>
           <CardContent>

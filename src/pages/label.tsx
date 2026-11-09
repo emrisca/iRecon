@@ -57,10 +57,12 @@ import type {
 
 function ExampleTile({ example }: { example: ExampleView }) {
   return (
-    <li className="flex flex-col gap-1.5">
+    <li className="media-tile flex flex-col gap-1.5">
       <img
         src={example.preview}
         alt={`Example from ${example.createdAt}`}
+        loading="lazy"
+        decoding="async"
         className="aspect-square w-full rounded-md border border-border object-cover"
       />
       <span className="truncate text-xs text-muted-foreground tabular-nums">
@@ -492,6 +494,8 @@ export function LabelPage() {
                       <img
                         src={entry.preview}
                         alt=""
+                        loading="lazy"
+                        decoding="async"
                         className="size-8 rounded-sm object-cover"
                       />
                     </Button>

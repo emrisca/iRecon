@@ -292,7 +292,7 @@ export function LibraryPage() {
             ) : (
               <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
                 {frames.map((frame) => (
-                  <li key={frame.id}>
+                  <li key={frame.id} className="media-tile">
                     <button
                       type="button"
                       className="flex w-full flex-col gap-1.5 text-left"
@@ -302,6 +302,8 @@ export function LibraryPage() {
                       <img
                         src={frame.preview}
                         alt={`Frame ${frame.id}`}
+                        loading="lazy"
+                        decoding="async"
                         className={
                           selected?.id === frame.id
                             ? "aspect-video w-full rounded-md border border-foreground object-cover"

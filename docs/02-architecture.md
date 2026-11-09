@@ -266,3 +266,38 @@ Local only. No telemetry, no network calls except an optional model download on 
 No process injection, no memory reads, no hooks into the target application. The app reads pixels through the OS capture API and draws its own window. That is the boundary, and it is the boundary that keeps it usable in games with anti-cheat: a screen overlay that never touches the game process is a very different thing from an injected DLL, though a game's terms of service can still forbid it. Say so in the app once, at first run, in plain language.
 
 Screenshots and recordings are user data in the user's Application Support folder. Nothing is encrypted; the app should not imply otherwise. A project delete removes the folder and the database, and should say exactly what it removes.
+
+
+## Live loop: three clocks
+
+The first live loop ran capture, preprocessing, inference, matching, tracking and
+paint in one thread, so the slowest stage set the frame rate. It measured about
+three frames a second. It is now three clocks around one frame slot.
+
+```
+capture clock   display rate, capped at 60 Hz
+                WGC session -> pooled RGBA buffer -> FrameSlot (overwrite)
+
+inference clock as fast as the model allows (about 12 Hz on CPU)
+                newest frame -> preprocess, run, match, track
+                -> boxes with the capture timestamp and the crop they belong to
+
+paint clock     60 Hz in the overlay
+                newest boxes, extrapolated by age, cleared when stale
+```
+
+The slot holds one frame. The producer overwrites it and counts the overwrite as
+a drop, and the consumer either takes the newest frame or nothing. Latency can
+therefore not accumulate, and a slow model cannot slow capture down; it only
+lowers how often boxes are refreshed. The overlay carries a box forward for at
+most 180 ms using the velocity between the last two publishes, which is what
+keeps a twelve hertz detection looking like motion rather than a slideshow.
+
+Capture never encodes, resizes or touches SQLite. Preview JPEGs are made on the
+inference clock at 800 ms, session recording at 250 ms, and candidate harvesting
+at 400 ms. A crop is carried with the frame as a normalized rectangle: detection
+runs on the crop, and the overlay multiplies boxes back out through it so there
+is one coordinate system on screen.
+
+File and folder sources drive the same pipeline through the same slot at a fixed
+20 Hz, so a replay is comparable to a live run instead of a stress test.

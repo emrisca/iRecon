@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, SkipForward, X } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
@@ -14,6 +14,7 @@ import { Separator } from "../components/ui/separator";
 import { Skeleton } from "../components/ui/skeleton";
 import { PageHeader } from "../components/page-header";
 import {
+  candidatePreview,
   isDesktop,
   listCandidates,
   listProjects,
@@ -23,16 +24,39 @@ import {
 import { formatDate } from "../lib/utils";
 import type { CandidateView, ExampleView, Project } from "../lib/types";
 
+const QUEUE_PAGE_SIZE = 40;
+
 export function ReviewPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
-  const [candidates, setCandidates] = useState<CandidateView[]>([]);
+  const [queue, setQueue] = useState<{
+    candidates: CandidateView[];
+    selected: CandidateView | null;
+  }>({ candidates: [], selected: null });
+  const { candidates, selected } = queue;
   const [showAll, setShowAll] = useState(false);
-  const [selected, setSelected] = useState<CandidateView | null>(null);
+  const [selectedPreview, setSelectedPreview] = useState<string | null>(null);
   const [nearest, setNearest] = useState<ExampleView[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(QUEUE_PAGE_SIZE);
+  const resolving = useRef(new Set<number>());
+  const projectRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setVisibleCount(QUEUE_PAGE_SIZE);
+  }, [projectId, showAll]);
+
+  useEffect(() => {
+    if (!selected) return;
+    const index = candidates.findIndex((candidate) => candidate.id === selected.id);
+    if (index < 0) return;
+    setVisibleCount((current) => (index < current ? current : index + 1));
+  }, [selected?.id, candidates]);
+
+  useEffect(() => {
+    projectRef.current = projectId;
+  }, [projectId]);
 
   useEffect(() => {
     let alive = true;
@@ -52,8 +76,7 @@ export function ReviewPage() {
 
   useEffect(() => {
     if (!projectId) {
-      setCandidates([]);
-      setSelected(null);
+      setQueue({ candidates: [], selected: null });
       setLoading(false);
       return;
     }
@@ -62,8 +85,11 @@ export function ReviewPage() {
     listCandidates(projectId, showAll ? undefined : "pending")
       .then((rows) => {
         if (!alive) return;
-        setCandidates(rows);
-        setSelected((current) => rows.find((row) => row.id === current?.id) ?? rows[0] ?? null);
+        setQueue((current) => ({
+          candidates: rows,
+          selected:
+            rows.find((row) => row.id === current.selected?.id) ?? rows[0] ?? null,
+        }));
       })
       .catch((reason: unknown) => {
         if (alive) setError(String(reason));
@@ -82,6 +108,7 @@ export function ReviewPage() {
       return;
     }
     let alive = true;
+    setNearest([]);
     nearestExamples(selected.id, 3)
       .then((rows) => {
         if (alive) setNearest(rows);
@@ -92,29 +119,113 @@ export function ReviewPage() {
     return () => {
       alive = false;
     };
-  }, [selected]);
+  }, [selected?.id]);
 
-  async function refresh(id: number) {
-    const rows = await listCandidates(id, showAll ? undefined : "pending");
-    setCandidates(rows);
-    return rows;
-  }
-
-  async function resolve(candidate: CandidateView, decision: "accept" | "reject" | "skip") {
-    setBusy(true);
-    setError(null);
-    try {
-      await resolveCandidate(candidate.id, decision);
-      if (projectId) {
-        const rows = await refresh(projectId);
-        setSelected(rows[0] ?? null);
-      }
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusy(false);
+  useEffect(() => {
+    if (!selected) {
+      setSelectedPreview(null);
+      return;
     }
+    let alive = true;
+    setSelectedPreview(null);
+    candidatePreview(selected.id)
+      .then((url) => {
+        if (alive) setSelectedPreview(url);
+      })
+      .catch(() => {
+        if (alive) setSelectedPreview(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selected?.id]);
+
+  function resolve(candidate: CandidateView, decision: "accept" | "reject" | "skip") {
+    if (candidate.state !== "pending" || resolving.current.has(candidate.id)) return;
+    resolving.current.add(candidate.id);
+    const project = projectId;
+    setError(null);
+
+    // Move the queue first. The backend write happens after the next paint, so
+    // the next candidate is readable while the crop is copied and embedded.
+    setQueue((current) => {
+      const index = current.candidates.findIndex((row) => row.id === candidate.id);
+      if (index < 0) return current;
+      const nextSelected =
+        current.selected?.id === candidate.id
+          ? current.candidates[index + 1] ?? current.candidates[index - 1] ?? null
+          : current.selected;
+      const nextState: CandidateView["state"] =
+        decision === "accept" ? "accepted" : decision === "reject" ? "rejected" : "skipped";
+      const nextCandidates = showAll
+        ? current.candidates.map((row) =>
+            row.id === candidate.id ? { ...row, state: nextState } : row
+          )
+        : current.candidates.filter((row) => row.id !== candidate.id);
+      return { candidates: nextCandidates, selected: nextSelected };
+    });
+
+    void resolveCandidate(candidate.id, decision)
+      .catch((reason: unknown) => {
+        if (project !== null && projectRef.current !== project) return;
+        setQueue((current) => {
+          const exists = current.candidates.some((row) => row.id === candidate.id);
+          if (showAll && exists) {
+            return {
+              ...current,
+              candidates: current.candidates.map((row) =>
+                row.id === candidate.id ? candidate : row
+              ),
+            };
+          }
+          if (exists) return current;
+          return {
+            candidates: [candidate, ...current.candidates].sort(
+              (left, right) => right.id - left.id
+            ),
+            selected: current.selected ?? candidate,
+          };
+        });
+        setError(String(reason));
+      })
+      .finally(() => resolving.current.delete(candidate.id));
   }
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (
+        event.defaultPrevented ||
+        event.repeat ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.isComposing
+      ) {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest(
+          "input, textarea, select, [contenteditable='true'], [contenteditable=''], [role='textbox']"
+        )
+      ) {
+        return;
+      }
+      if (loading || !selected || selected.state !== "pending") return;
+
+      const key = event.key.toLowerCase();
+      const decision =
+        key === "a" ? "accept" : key === "r" ? "reject" : key === "s" ? "skip" : null;
+      if (!decision) return;
+
+      event.preventDefault();
+      resolve(selected, decision);
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [loading, selected, showAll, projectId]);
 
   const pending = candidates.filter((candidate) => candidate.state === "pending").length;
 
@@ -211,39 +322,52 @@ export function ReviewPage() {
                 {selected ? (
                   <>
                     <img
-                      src={selected.preview}
+                      src={selectedPreview ?? selected.thumb}
                       alt={`Candidate ${selected.id}`}
+                      decoding="async"
                       className="max-h-[38vh] w-full rounded-md border border-border object-contain"
                     />
                     <div className="flex flex-wrap items-center gap-2">
                       <Button
                         size="sm"
                         className="gap-1.5"
-                        disabled={busy || selected.state !== "pending"}
+                        disabled={selected.state !== "pending"}
+                        aria-keyshortcuts="A"
                         onClick={() => resolve(selected, "accept")}
                       >
                         <Check className="size-4" aria-hidden="true" />
                         Accept as positive
+                        <kbd className="ml-0.5 rounded border border-current/30 px-1 text-[10px] font-medium opacity-70">
+                          A
+                        </kbd>
                       </Button>
                       <Button
                         size="sm"
                         variant="outline"
                         className="gap-1.5"
-                        disabled={busy || selected.state !== "pending"}
+                        disabled={selected.state !== "pending"}
+                        aria-keyshortcuts="R"
                         onClick={() => resolve(selected, "reject")}
                       >
                         <X className="size-4" aria-hidden="true" />
                         Reject as negative
+                        <kbd className="ml-0.5 rounded border border-current/30 px-1 text-[10px] font-medium opacity-70">
+                          R
+                        </kbd>
                       </Button>
                       <Button
                         size="sm"
                         variant="ghost"
                         className="gap-1.5"
-                        disabled={busy || selected.state !== "pending"}
+                        disabled={selected.state !== "pending"}
+                        aria-keyshortcuts="S"
                         onClick={() => resolve(selected, "skip")}
                       >
                         <SkipForward className="size-4" aria-hidden="true" />
                         Skip
+                        <kbd className="ml-0.5 rounded border border-current/30 px-1 text-[10px] font-medium opacity-70">
+                          S
+                        </kbd>
                       </Button>
                     </div>
                   </>
@@ -275,6 +399,8 @@ export function ReviewPage() {
                         <img
                           src={example.preview}
                           alt={`Example ${example.id}`}
+                          loading="lazy"
+                          decoding="async"
                           className="aspect-square w-full rounded-md border border-border object-cover"
                         />
                         <Badge variant="outline" className="justify-center">
@@ -299,8 +425,8 @@ export function ReviewPage() {
               </CardHeader>
               <CardContent>
                 <ul className="overflow-hidden rounded-lg border border-border">
-                  {candidates.map((candidate, index) => (
-                    <li key={candidate.id}>
+                  {candidates.slice(0, visibleCount).map((candidate, index) => (
+                    <li key={candidate.id} className="queue-row">
                       {index > 0 ? <Separator /> : null}
                       <button
                         type="button"
@@ -310,11 +436,16 @@ export function ReviewPage() {
                             ? "flex w-full items-center gap-2 bg-muted p-2 text-left"
                             : "flex w-full items-center gap-2 p-2 text-left"
                         }
-                        onClick={() => setSelected(candidate)}
+                        onClick={() =>
+                          setQueue((current) => ({ ...current, selected: candidate }))
+                        }
                       >
                         <img
-                          src={candidate.preview}
+                          src={candidate.thumb}
                           alt=""
+                          loading="lazy"
+                          decoding="async"
+                          draggable={false}
                           className="size-10 shrink-0 rounded-sm border border-border object-cover"
                         />
                         <span className="flex min-w-0 flex-1 flex-col">
@@ -333,6 +464,24 @@ export function ReviewPage() {
                     </li>
                   ))}
                 </ul>
+                {visibleCount < candidates.length ? (
+                  <div className="flex items-center justify-between gap-2 px-1 pt-2">
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      Showing {visibleCount} of {candidates.length}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        setVisibleCount((current) =>
+                          Math.min(candidates.length, current + QUEUE_PAGE_SIZE)
+                        )
+                      }
+                    >
+                      Show {Math.min(QUEUE_PAGE_SIZE, candidates.length - visibleCount)} more
+                    </Button>
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
           </div>

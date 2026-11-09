@@ -18,7 +18,15 @@ import type {
   LabelClass,
   ModelCatalog,
   ModelProgress,
+  OverlayState,
+  PaintStats,
   Project,
+  ProjectDetector,
+  DetectorComparison,
+  SessionAudit,
+  SessionEvalFrame,
+  SessionFrame,
+  SessionView,
   SourceKind,
   SourceView,
 } from "./types";
@@ -28,7 +36,7 @@ export const isDesktop =
 
 let demoId = 1;
 
-function demo(name: string): Project {
+function demo(name: string, examples = 0, classes = 0, frames = 0): Project {
   const slug = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -39,6 +47,9 @@ function demo(name: string): Project {
     slug,
     path: `projects/${slug}`,
     createdAt: new Date().toISOString(),
+    examples,
+    frames,
+    classes,
   };
 }
 
@@ -48,7 +59,7 @@ function demo(name: string): Project {
  * shape in the demo frame, so a box drawn over that shape scores its class
  * highest and the nearest badges mean something.
  */
-const demoSeed = demo("Demo project");
+const demoSeed = demo("Demo project", 9, 3, 2);
 let demoProjects: Project[] = [demoSeed];
 
 const DEMO_COLORS = ["#d05f3f", "#4f7d5a", "#c9a227", "#8b6fb0"];
@@ -163,6 +174,25 @@ export async function deleteProject(id: number): Promise<void> {
     return;
   }
   await invoke("project_delete", { id });
+}
+
+const demoFloors = new Map<number, number>();
+
+/** The minimum match score for a project, 0 to 1. Zero means no floor. */
+export async function projectMatchFloor(projectId: number): Promise<number> {
+  if (!isDesktop) return demoFloors.get(projectId) ?? 0;
+  return invoke<number>("project_match_floor", { projectId });
+}
+
+export async function setProjectMatchFloor(
+  projectId: number,
+  floor: number
+): Promise<number> {
+  if (!isDesktop) {
+    demoFloors.set(projectId, floor);
+    return floor;
+  }
+  return invoke<number>("project_set_match_floor", { projectId, floor });
 }
 
 let demoFrameId = 1;
@@ -298,9 +328,90 @@ export async function listExamples(classId: number): Promise<ExampleView[]> {
   return invoke<ExampleView[]>("examples_list", { classId });
 }
 
-export async function startCapture(projectId?: number): Promise<void> {
+export async function startCapture(
+  projectId?: number,
+  record = false,
+  sourceId?: number | null
+): Promise<void> {
   if (!isDesktop) throw new Error("Screen capture needs the desktop app");
-  await invoke("capture_start", { projectId });
+  await invoke("capture_start", { projectId, record, sourceId: sourceId ?? null });
+}
+
+export async function listSessions(projectId: number): Promise<SessionView[]> {
+  if (!isDesktop) return [];
+  return invoke<SessionView[]>("session_list", { projectId });
+}
+
+export async function listSessionFrames(sessionId: number): Promise<SessionFrame[]> {
+  if (!isDesktop) return [];
+  return invoke<SessionFrame[]>("session_frames", { sessionId });
+}
+
+export async function sessionFrameImage(frameId: number): Promise<string> {
+  if (!isDesktop) return "";
+  return invoke<string>("session_frame_image", { frameId });
+}
+
+export async function evaluateSession(sessionId: number): Promise<SessionEvalFrame[]> {
+  if (!isDesktop) return [];
+  return invoke<SessionEvalFrame[]>("session_evaluate", { sessionId });
+}
+
+export async function auditSession(sessionId: number): Promise<SessionAudit> {
+  if (!isDesktop) throw new Error("Auditing a session needs the desktop app");
+  return invoke<SessionAudit>("session_audit", { sessionId });
+}
+
+export async function deleteSession(sessionId: number): Promise<void> {
+  if (!isDesktop) return;
+  await invoke("session_delete", { id: sessionId });
+}
+
+export async function listProjectDetectors(
+  projectId: number
+): Promise<ProjectDetector[]> {
+  if (!isDesktop) return [];
+  return invoke<ProjectDetector[]>("detector_list", { projectId });
+}
+
+export async function importProjectDetector(
+  projectId: number,
+  path: string,
+  name?: string
+): Promise<ProjectDetector> {
+  if (!isDesktop) throw new Error("Importing a detector needs the desktop app");
+  return invoke<ProjectDetector>("detector_import", { projectId, path, name: name ?? null });
+}
+
+export async function activateProjectDetector(
+  projectId: number,
+  id: number
+): Promise<void> {
+  if (!isDesktop) throw new Error("Activating a detector needs the desktop app");
+  await invoke("detector_activate", { projectId, id });
+}
+
+export async function deactivateProjectDetector(projectId: number): Promise<void> {
+  if (!isDesktop) throw new Error("Deactivating a detector needs the desktop app");
+  await invoke("detector_deactivate", { projectId });
+}
+
+export async function deleteProjectDetector(id: number): Promise<void> {
+  if (!isDesktop) return;
+  await invoke("detector_delete", { id });
+}
+
+export async function compareDetectors(
+  projectId: number,
+  detectorId: number,
+  sessionId: number
+): Promise<DetectorComparison> {
+  if (!isDesktop) throw new Error("Detector comparison needs the desktop app");
+  return invoke<DetectorComparison>("detector_compare", {
+    projectId,
+    detectorId,
+    sessionId,
+  });
 }
 
 export async function watchCapture(watching: boolean): Promise<void> {
@@ -313,14 +424,38 @@ export async function stopCapture(): Promise<void> {
   await invoke("capture_stop");
 }
 
-export async function showOverlay(): Promise<void> {
+export async function showOverlay(): Promise<OverlayState> {
   if (!isDesktop) throw new Error("The overlay needs the desktop app");
-  await invoke("overlay_show");
+  return invoke<OverlayState>("overlay_show");
 }
 
-export async function hideOverlay(): Promise<void> {
-  if (!isDesktop) return;
-  await invoke("overlay_hide");
+export async function hideOverlay(): Promise<OverlayState> {
+  if (!isDesktop) {
+    return { visible: false, calibration: false, hotkey: "Ctrl+Alt+O" };
+  }
+  return invoke<OverlayState>("overlay_hide");
+}
+
+export async function getOverlayState(): Promise<OverlayState> {
+  if (!isDesktop) {
+    return { visible: false, calibration: false, hotkey: "Ctrl+Alt+O" };
+  }
+  return invoke<OverlayState>("overlay_state");
+}
+
+/** Switches the overlay between detections and the sine-wave paint benchmark. */
+export async function setCalibration(enabled: boolean): Promise<OverlayState> {
+  if (!isDesktop) {
+    return { visible: false, calibration: enabled, hotkey: "Ctrl+Alt+O" };
+  }
+  return invoke<OverlayState>("overlay_calibration", { enabled });
+}
+
+export async function onPaint(
+  handler: (stats: PaintStats) => void
+): Promise<UnlistenFn> {
+  if (!isDesktop) return () => {};
+  return listen<PaintStats>("spike:paint", (event) => handler(event.payload));
 }
 
 export async function getModelCatalog(): Promise<ModelCatalog | null> {
@@ -622,7 +757,7 @@ function demoCandidatesFor(projectId: number): CandidateView[] {
       className: entry.name,
       color: entry.color,
       path: `candidates/${entry.id}/${index + 1}.png`,
-      preview: demoPreview(entry.color, index + 2),
+      thumb: demoPreview(entry.color, index + 2),
       score: 0.72 + index * 0.06,
       state: "pending" as const,
       createdAt: new Date(Date.now() - index * 90_000).toISOString(),
@@ -642,6 +777,17 @@ export async function listCandidates(
       .map((entry) => ({ ...entry }));
   }
   return invoke<CandidateView[]>("candidates_list", { projectId, state: state ?? null });
+}
+
+export async function candidatePreview(id: number): Promise<string> {
+  if (!isDesktop) {
+    for (const rows of demoCandidates.values()) {
+      const found = rows.find((entry) => entry.id === id);
+      if (found) return found.thumb;
+    }
+    return "";
+  }
+  return invoke<string>("candidate_preview", { id });
 }
 
 export async function nearestExamples(id: number, limit = 3): Promise<ExampleView[]> {

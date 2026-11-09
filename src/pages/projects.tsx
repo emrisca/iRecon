@@ -21,17 +21,32 @@ export function ProjectsPage() {
 
   useEffect(() => {
     let alive = true;
-    listProjects()
-      .then((rows) => {
-        if (alive) setProjects(rows);
-      })
-      .catch((reason: unknown) => {
-        if (!alive) return;
-        setError(String(reason));
-        setProjects([]);
-      });
+    const load = () => {
+      listProjects()
+        .then((rows) => {
+          if (!alive) return;
+          setProjects(rows);
+          setError(null);
+        })
+        .catch((reason: unknown) => {
+          if (!alive) return;
+          setError(String(reason));
+          setProjects([]);
+        });
+    };
+    // Labeling happens on another page, so refresh when this one regains focus
+    // instead of showing the counts from the last visit.
+    const onFocus = () => load();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    load();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       alive = false;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
@@ -154,9 +169,17 @@ export function ProjectsPage() {
                   <span className="hidden text-xs text-muted-foreground tabular-nums sm:block">
                     {formatDate(project.createdAt)}
                   </span>
-                  <Badge variant="secondary" className="tabular-nums">
-                    0 examples
-                  </Badge>
+                  <span className="hidden items-center gap-1.5 sm:flex">
+                    <Badge variant="secondary" className="tabular-nums">
+                      {project.examples} {project.examples === 1 ? "example" : "examples"}
+                    </Badge>
+                    <Badge variant="outline" className="tabular-nums">
+                      {project.classes} {project.classes === 1 ? "class" : "classes"}
+                    </Badge>
+                    <Badge variant="outline" className="tabular-nums">
+                      {project.frames} {project.frames === 1 ? "frame" : "frames"}
+                    </Badge>
+                  </span>
                   <Button
                     size="icon"
                     variant="ghost"

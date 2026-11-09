@@ -14,6 +14,11 @@ pub struct Project {
     pub slug: String,
     pub created_at: String,
     pub path: String,
+    /// Counted in the same query as the project, so the Projects page never
+    /// shows a stale or guessed number.
+    pub examples: i64,
+    pub frames: i64,
+    pub classes: i64,
 }
 
 /// Adds a column to an existing database without a migration table. SQLite has
@@ -103,7 +108,46 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             primary key (frame_id, class_id)
         );
 
+        create table if not exists capture_session (
+            id integer primary key autoincrement,
+            project_id integer not null references project(id) on delete cascade,
+            started_at text not null,
+            ended_at text,
+            width integer not null default 0,
+            height integer not null default 0,
+            frames integer not null default 0,
+            detections integer not null default 0,
+            model text,
+            note text
+        );
+
+        create table if not exists session_frame (
+            id integer primary key autoincrement,
+            session_id integer not null references capture_session(id) on delete cascade,
+            frame_index integer not null,
+            path text not null,
+            width integer not null,
+            height integer not null,
+            at_ms integer not null,
+            boxes text not null,
+            proposals text not null,
+            unique (session_id, frame_index)
+        );
+
         create index if not exists frame_project on frame(project_id);
+        create table if not exists project_detector (
+            id integer primary key autoincrement,
+            project_id integer not null references project(id) on delete cascade,
+            name text not null,
+            path text not null,
+            input_size integer not null,
+            active integer not null default 0,
+            created_at text not null
+        );
+
+        create index if not exists session_project on capture_session(project_id);
+        create index if not exists project_detector_project on project_detector(project_id);
+        create index if not exists session_frame_session on session_frame(session_id);
         create index if not exists source_project on source(project_id);
         create index if not exists candidate_pending on candidate(project_id, state);
         create index if not exists class_project on class(project_id);
@@ -115,6 +159,10 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     ensure_column(&conn, "example", "frame_id", "integer")?;
     ensure_column(&conn, "example", "embedding", "blob")?;
     ensure_column(&conn, "example", "embedding_model", "text")?;
+    ensure_column(&conn, "project_detector", "active", "integer not null default 0")?;
+    // Minimum match score for boxes and review candidates. Zero keeps the old
+    // behaviour; the Capture lab slider raises it.
+    ensure_column(&conn, "project", "match_floor", "real not null default 0.0")?;
     conn.execute_batch("create index if not exists example_frame on example(frame_id);")?;
 
     // Classes created before thresholds were measured still carry the old
@@ -143,6 +191,9 @@ fn row_to_project(row: &rusqlite::Row<'_>, root: &Path) -> rusqlite::Result<Proj
         path: root.join(&slug).to_string_lossy().to_string(),
         slug,
         created_at: row.get(3)?,
+        examples: row.get(4)?,
+        frames: row.get(5)?,
+        classes: row.get(6)?,
     })
 }
 
@@ -168,6 +219,29 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
+fn project_rows(conn: &Connection, root: &Path) -> Result<Vec<Project>, String> {
+    let mut stmt = conn
+        .prepare(
+            "select p.id, p.name, p.slug, p.created_at,
+                    (select count(*) from example e
+                     join class c on c.id = e.class_id
+                     where c.project_id = p.id),
+                    (select count(*) from frame f where f.project_id = p.id),
+                    (select count(*) from class c where c.project_id = p.id)
+             from project p
+             order by p.created_at desc, p.id desc",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row_to_project(row, root))
+        .map_err(|e| e.to_string())?;
+    let mut projects = Vec::new();
+    for row in rows {
+        projects.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(projects)
+}
+
 #[tauri::command]
 pub fn projects_list(
     app: AppHandle,
@@ -175,17 +249,7 @@ pub fn projects_list(
 ) -> Result<Vec<Project>, String> {
     let root = projects_root(&app)?;
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare("select id, name, slug, created_at from project order by created_at desc, id desc")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| row_to_project(row, &root))
-        .map_err(|e| e.to_string())?;
-    let mut projects = Vec::new();
-    for row in rows {
-        projects.push(row.map_err(|e| e.to_string())?);
-    }
-    Ok(projects)
+    project_rows(&conn, &root)
 }
 
 #[tauri::command]
@@ -234,7 +298,40 @@ pub fn project_create(
         slug,
         created_at,
         path: path.to_string_lossy().to_string(),
+        examples: 0,
+        frames: 0,
+        classes: 0,
     })
+}
+
+#[tauri::command]
+pub fn project_match_floor(
+    state: tauri::State<'_, AppState>,
+    project_id: i64,
+) -> Result<f32, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "select match_floor from project where id = ?1",
+        params![project_id],
+        |row| row.get(0),
+    )
+    .map_err(|_| "That project is gone".to_string())
+}
+
+#[tauri::command]
+pub fn project_set_match_floor(
+    state: tauri::State<'_, AppState>,
+    project_id: i64,
+    floor: f32,
+) -> Result<f32, String> {
+    let floor = floor.clamp(0.0, 1.0);
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "update project set match_floor = ?2 where id = ?1",
+        params![project_id, floor],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(floor)
 }
 
 #[tauri::command]
@@ -261,4 +358,53 @@ pub fn project_delete(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db(tag: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("irecon-db-{tag}-{stamp}.sqlite"))
+    }
+
+    #[test]
+    fn project_rows_count_frames_classes_and_examples() {
+        let path = temp_db("counts");
+        let conn = open(&path).expect("database opens");
+        conn.execute_batch(
+            "insert into project (name, slug, created_at) values ('Traffic', 'traffic', '2026-01-01');
+             insert into project (name, slug, created_at) values ('Hud', 'hud', '2026-01-02');
+             insert into class (project_id, name, color) values (1, 'car', '#fff');
+             insert into class (project_id, name, color) values (1, 'sign', '#000');
+             insert into example (class_id, path, created_at) values (1, 'a.png', '2026-01-03');
+             insert into example (class_id, path, created_at) values (1, 'b.png', '2026-01-03');
+             insert into example (class_id, path, created_at) values (2, 'c.png', '2026-01-03');
+             insert into frame (project_id, path, width, height, created_at) values (1, 'f1.png', 16, 16, '2026-01-03');
+             insert into frame (project_id, path, width, height, created_at) values (2, 'f3.png', 16, 16, '2026-01-03');",
+        )
+        .expect("fixture inserts");
+
+        let rows = project_rows(&conn, Path::new("/root")).expect("projects list");
+        let counts: Vec<(String, i64, i64, i64)> = rows
+            .into_iter()
+            .map(|p| (p.name, p.examples, p.classes, p.frames))
+            .collect();
+        assert_eq!(
+            counts,
+            vec![("Hud".to_string(), 0, 0, 1), ("Traffic".to_string(), 3, 2, 1)]
+        );
+
+        let floor: f32 = conn
+            .query_row("select match_floor from project where id = 1", [], |row| row.get(0))
+            .expect("match floor column");
+        assert_eq!(floor, 0.0);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
 }

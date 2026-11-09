@@ -79,3 +79,58 @@ Reopen if: Nano at 384 boxes under half the cars in real footage, which promotes
 Detections are already a clean event stream, so nothing in the plan blocks automation. Building rules before the detector is stable would mean a rules layer whose false alarm rate is inherited from flickering boxes, which is the fastest way to make the tool untrustworthy.
 
 Reopen after Phase 4 exit criteria are met.
+
+
+## 13. Windows Graphics Capture first, duplication second, still capture last
+
+Measured on a 2560 by 1440 display at 143 Hz with an RTX 4060 Ti, release build,
+same animated desktop, twelve seconds each:
+
+| Path | Rate | Frame gap p50 |
+| --- | --- | --- |
+| Still capture, GDI readback | 3.0 fps | 205.6 ms |
+| Still capture with `xcap`'s `wgc` feature | 38.3 fps | 25.6 ms |
+| Desktop Duplication through `xcap` | 53.0 fps | 20.0 ms |
+| Graphics Capture through `windows-capture` | 106.0 fps | 8.0 ms |
+
+Graphics Capture follows the compositor, so its rate scales with the display
+instead of sitting at a fixed handoff, and its callback carries a D3D11 texture
+we copy once. Duplication is the fallback for a display that is not primary,
+because the WGC path here opens the primary monitor only. Still capture stays
+for windows and as a last resort, with a status-line note, because a silent
+three frames a second looks like a bug.
+
+The 15 ms minimum update interval is deliberate. A 16 ms cap aliases against
+60 Hz content that updates every 16.7 ms and costs whole frames: a twenty second
+soak run on the production clock measured 51 fps with 33 ms interval spikes
+until the cap moved to 15 ms, after which the same path held 59.8 fps for ten
+minutes. Uncapped is not the answer either, because an uncapped 143 Hz session
+hands over 1.7 GB/s of RGBA for nothing downstream can consume.
+
+Reopen if: WGC is refused in a mode the game uses, in which case duplication
+already exists as the fallback, or a future display rate makes the cap wrong.
+
+
+## 14. Reuse frame buffers instead of allocating per frame
+
+A 2560 by 1440 RGBA frame is 14.7 MB, and the first version allocated one per
+frame. The soak harness caught it immediately: the working set grew 48 MB in
+twenty seconds, which over ten minutes is both a failed gate and a real leak by
+any other name. Frames now carry a buffer that goes back to a small pool when
+its last holder drops it, so steady state allocates nothing. The same path then
+grew 4 MB over ten minutes at 59.8 fps.
+
+The pool holds at most two spares on top of the buffers in use, because a larger
+pool only keeps memory that the next second would allocate anyway.
+
+
+## 15. App release binaries come from the Tauri CLI
+
+A plain `cargo build --release` produced a binary whose windows load
+`http://localhost:1420`: the build embedded the dev URL, so the overlay page
+never executed without the Vite server, and the calibration run wrote an
+empty log while the window reported itself visible. `npm run tauri build --
+--no-bundle` resolves the same context to `http://tauri.localhost/
+overlay.html`, and the same measurement then reported 60.2 fps. The soak
+harness never opens a window, so `cargo run --release --bin capture_soak`
+stays as it is.

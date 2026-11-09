@@ -10,15 +10,18 @@ import {
 } from "./lib/api";
 import { useTheme } from "./hooks/use-theme";
 import { CaptureLabPage } from "./pages/capture-lab";
+import { HomePage } from "./pages/home";
+import { DetectorsPage } from "./pages/detectors";
 import { EvalPage } from "./pages/eval";
 import { LabelPage } from "./pages/label";
 import { LibraryPage } from "./pages/library";
 import { ProjectsPage } from "./pages/projects";
 import { ReviewPage } from "./pages/review";
+import { SessionsPage } from "./pages/sessions";
 import { SourcesPage } from "./pages/sources";
 
 export default function App() {
-  const [section, setSection] = useState<Section>("projects");
+  const [section, setSection] = useState<Section>("home");
   const [live, setLive] = useState(false);
   const [liveBusy, setLiveBusy] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -67,12 +70,15 @@ export default function App() {
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
+          {section === "home" ? <HomePage onSelect={setSection} /> : null}
           {section === "projects" ? <ProjectsPage /> : null}
           {section === "sources" ? <SourcesPage /> : null}
           {section === "library" ? <LibraryPage /> : null}
           {section === "review" ? <ReviewPage /> : null}
           {section === "label" ? <LabelPage /> : null}
           {section === "capture" ? <CaptureLabPage /> : null}
+          {section === "sessions" ? <SessionsPage /> : null}
+          {section === "detectors" ? <DetectorsPage /> : null}
           {section === "eval" ? <EvalPage /> : null}
         </div>
       </main>

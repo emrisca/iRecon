@@ -4,6 +4,8 @@
 //! matched and the score it got. Accepting writes a positive example, rejecting
 //! writes a negative, and both take effect on the next pool reload.
 
+use std::path::Path;
+
 use rusqlite::params;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -21,16 +23,45 @@ pub struct CandidateView {
     pub class_name: String,
     pub color: String,
     pub path: String,
-    pub preview: String,
+    pub thumb: String,
     pub score: f32,
     pub state: String,
     pub created_at: String,
 }
 
-fn preview_of(path: &str) -> String {
-    image::open(path)
-        .map(|image| label::preview(&image.to_rgba8()))
-        .unwrap_or_default()
+/// Candidate images are immutable once harvested, so their small queue thumb
+/// and larger detail preview can be cached beside the project. The queue only
+/// decodes an image the first time it is listed.
+fn cached_image(root: &Path, id: i64, path: &str, kind: &str, width: u32, quality: u8) -> String {
+    let thumbs = root.join("thumbs");
+    let _ = std::fs::create_dir_all(&thumbs);
+    let cache = thumbs.join(format!("candidate-{id}-{kind}.jpg"));
+    if let Ok(bytes) = std::fs::read(&cache) {
+        return label::jpeg_data_url(&bytes);
+    }
+    let bytes = image::open(path)
+        .map(|image| label::jpeg_bytes(&image.to_rgba8(), width, quality))
+        .unwrap_or_default();
+    if !bytes.is_empty() {
+        let _ = std::fs::write(&cache, &bytes);
+    }
+    label::jpeg_data_url(&bytes)
+}
+
+#[tauri::command]
+pub fn candidate_preview(app: AppHandle, id: i64) -> Result<String, String> {
+    let (project_id, path) = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "select project_id, path from candidate where id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|_| "That candidate is gone".to_string())?
+    };
+    let (_slug, root) = label::project_folder(&app, project_id)?;
+    Ok(cached_image(&root, id, &path, "preview", 640, 78))
 }
 
 #[tauri::command]
@@ -69,24 +100,32 @@ pub fn candidates_list(
         })
         .map_err(|e| e.to_string())?;
 
-    let mut candidates = Vec::new();
-    for row in rows {
-        let (id, project_id, class_id, class_name, color, path, score, state, created_at) =
-            row.map_err(|e| e.to_string())?;
-        candidates.push(CandidateView {
-            id,
-            project_id,
-            class_id,
-            class_name,
-            color,
-            preview: preview_of(&path),
-            path,
-            score,
-            state,
-            created_at,
-        });
-    }
-    Ok(candidates)
+    let rows = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    drop(statement);
+    drop(conn);
+
+    let (_slug, root) = label::project_folder(&app, project_id)?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, project_id, class_id, class_name, color, path, score, state, created_at)| {
+                CandidateView {
+                    id,
+                    project_id,
+                    class_id,
+                    class_name,
+                    color,
+                    thumb: cached_image(&root, id, &path, "thumb", 160, 70),
+                    path,
+                    score,
+                    state,
+                    created_at,
+                }
+            },
+        )
+        .collect())
 }
 
 /// The examples nearest a candidate, for the evidence beside it on the review
@@ -129,10 +168,59 @@ pub fn candidate_nearest(
         return Ok(Vec::new());
     }
 
-    let rows = label::examples_list(app.clone(), class_id)?;
+    // Only the nearest examples are needed here. Loading the whole class would
+    // reopen and base64 every example crop for each selected candidate.
+    let rows: Vec<(i64, i64, String, String, String, String)> = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut rows = Vec::new();
+        for (example_id, _) in &nearest {
+            if let Ok(row) = conn.query_row(
+                "select id, class_id, path, coalesce(bbox, ''), role, created_at
+                 from example where id = ?1",
+                params![example_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            ) {
+                rows.push(row);
+            }
+        }
+        rows
+    };
+
     let mut by_id: std::collections::HashMap<i64, ExampleView> = rows
         .into_iter()
-        .map(|row| (row.id, row))
+        .map(|(id, class_id, path, bbox, role, created_at)| {
+            let (width, height, preview) = match image::open(&path) {
+                Ok(image) => {
+                    let image = image.to_rgba8();
+                    (image.width(), image.height(), label::png_data_url(&image))
+                }
+                Err(_) => (0, 0, String::new()),
+            };
+            (
+                id,
+                ExampleView {
+                    id,
+                    class_id,
+                    path,
+                    width,
+                    height,
+                    preview,
+                    bbox,
+                    role,
+                    created_at,
+                },
+            )
+        })
         .collect();
     Ok(nearest
         .into_iter()

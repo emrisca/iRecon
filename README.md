@@ -53,6 +53,17 @@ On macOS the first capture run asks for Screen Recording. Grant it to iRecon, th
 
 `npm run build` typechecks and builds the front end without opening the desktop window.
 
+Build the desktop binary itself with `npm run tauri build -- --no-bundle`. A plain `cargo build --release` embeds the dev server URL, so its windows try to load `http://localhost:1420` and stay blank unless `npm run dev` is running.
+
+The capture path has a gate harness of its own. It drives the production capture clock at full display resolution for ten minutes and prints G1 (rate), G2 (per-frame cost) and G5 (RSS, drops, errors), exiting non-zero if any of them miss:
+
+```bash
+cd src-tauri
+cargo run --release --bin capture_soak -- --seconds 600
+```
+
+It needs a changing screen, because Graphics Capture only delivers frames the compositor actually produced; a motionless desktop reads near zero and measures nothing.
+
 The detector is not in the repository. The Capture lab page downloads it on request, 108 MB once, and checks it against a pinned SHA-256 before anything runs. To fetch it without opening the app:
 
 ```bash

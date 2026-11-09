@@ -1,8 +1,11 @@
 import {
+  Cpu,
   Crosshair,
   Eye,
+  Film,
   FolderKanban,
   Gauge,
+  Home,
   Images,
   ListChecks,
   ScanLine,
@@ -24,15 +27,21 @@ export type Section =
   | "review"
   | "label"
   | "capture"
-  | "eval";
+  | "sessions"
+  | "detectors"
+  | "eval"
+  | "home";
 
 const items: Array<{ id: Section; label: string; icon: LucideIcon }> = [
+  { id: "home", label: "Start here", icon: Home },
   { id: "projects", label: "Projects", icon: FolderKanban },
   { id: "sources", label: "Sources", icon: Waypoints },
   { id: "library", label: "Library", icon: Images },
   { id: "review", label: "Review", icon: ListChecks },
   { id: "label", label: "Label", icon: Tags },
   { id: "capture", label: "Capture lab", icon: ScanLine },
+  { id: "sessions", label: "Sessions", icon: Film },
+  { id: "detectors", label: "Detectors", icon: Cpu },
   { id: "eval", label: "Evaluate", icon: Gauge },
 ];
 

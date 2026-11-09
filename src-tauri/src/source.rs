@@ -85,7 +85,7 @@ fn row_to_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceView> {
     })
 }
 
-fn source_row(app: &AppHandle, id: i64) -> Result<SourceView, String> {
+pub(crate) fn source_row(app: &AppHandle, id: i64) -> Result<SourceView, String> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     conn.query_row(
@@ -301,7 +301,7 @@ pub fn source_delete(app: AppHandle, id: i64) -> Result<(), String> {
 #[tauri::command]
 pub fn source_preview(app: AppHandle, id: i64) -> Result<FramePayload, String> {
     let source = source_row(&app, id)?;
-    let image = read_source(&source)?;
+    let image = load_frame(&source)?;
     let (data, width, height) = preview(&image);
     Ok(FramePayload {
         data,
@@ -319,7 +319,7 @@ pub fn source_frame(app: AppHandle, project_id: i64, id: i64) -> Result<label::F
     if source.project_id != project_id {
         return Err("That source belongs to another project".into());
     }
-    let image = read_source(&source)?;
+    let image = load_frame(&source)?;
     let (_slug, folder) = label::project_folder(&app, project_id)?;
     let path = folder
         .join("frames")
@@ -375,7 +375,31 @@ fn first_image(folder: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{} has no PNG or JPEG images", folder.display()))
 }
 
-fn read_source(source: &SourceView) -> Result<RgbaImage, String> {
+/// Every image a file or folder source can replay, in a stable order. The
+/// sequence player uses this so a folder behaves like a recorded clip.
+pub(crate) fn sequence_paths(kind: &str, target: &str) -> Result<Vec<PathBuf>, String> {
+    let path = Path::new(target);
+    if kind == "file" {
+        if !path.is_file() {
+            return Err(format!("There is no file at {target}"));
+        }
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let entries =
+        std::fs::read_dir(path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|entry| entry.is_file() && is_image(entry))
+        .collect();
+    paths.sort();
+    if paths.is_empty() {
+        return Err(format!("{} has no PNG or JPEG images", path.display()));
+    }
+    Ok(paths)
+}
+
+pub(crate) fn load_frame(source: &SourceView) -> Result<RgbaImage, String> {
     match source.kind.as_str() {
         "display" => {
             let id: u32 = source

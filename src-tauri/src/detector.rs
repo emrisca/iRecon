@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use ort::environment::Environment;
 use ort::session::Session;
-use ort::value::Tensor;
-use serde::Serialize;
+use ort::value::{Tensor, ValueType};
+use serde::{Deserialize, Serialize};
 
 /// ONNX Runtime allows exactly one environment per process, so it is created once
 /// and shared by every session iRecon opens.
@@ -128,7 +128,16 @@ const CLASS_NAMES: [&str; 91] = [
     "toothbrush",
 ];
 
-#[derive(Clone, Serialize)]
+/// Where one frame's detector time went. `run_ms` is the number `analyse`
+/// reported before the split existed.
+#[derive(Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisTiming {
+    pub preprocess_ms: f32,
+    pub run_ms: f32,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Detection {
     pub label: String,
@@ -192,6 +201,57 @@ impl Detector {
         })
     }
 
+    /// Opens a project-trained ONNX file and derives its static square input
+    /// from the graph. The same name/shape/output checks and blank warm-up as
+    /// the pinned models run before the file is accepted.
+    pub fn load_imported(path: &Path) -> Result<Self, String> {
+        let mut session = Session::builder(environment()?)
+            .map_err(|e| e.to_string())?
+            .commit_from_file(path)
+            .map_err(|e| format!("Could not open the ONNX model: {e}"))?;
+        let input = session
+            .inputs()
+            .first()
+            .ok_or("The model has no inputs")?;
+        if input.name() != INPUT_NAME {
+            return Err(format!(
+                "The model expects an input called {}, but iRecon feeds {INPUT_NAME}.",
+                input.name()
+            ));
+        }
+        let input_size = match input.dtype() {
+            ValueType::Tensor { shape, .. } => {
+                let dims: Vec<i64> = shape.iter().copied().collect();
+                if dims.len() != 4 || dims[1] != 3 || dims[2] <= 0 || dims[2] != dims[3] {
+                    return Err(format!(
+                        "Expected a static NCHW float input with three channels and a square image, found {dims:?}."
+                    ));
+                }
+                dims[2] as u32
+            }
+            _ => return Err("The model input is not a float tensor".into()),
+        };
+        let outputs: Vec<String> = session
+            .outputs()
+            .iter()
+            .map(|output| output.name().to_string())
+            .collect();
+        for required in ["dets", "labels"] {
+            if !outputs.iter().any(|name| name == required) {
+                return Err(format!(
+                    "The model is missing the {required} output. Found: {outputs:?}"
+                ));
+            }
+        }
+        let (queries, slots) = probe(&mut session, input_size)?;
+        Ok(Detector {
+            session,
+            queries,
+            slots,
+            input_size,
+        })
+    }
+
     pub fn describe(&self) -> String {
         format!(
             "{} px input, {} queries, {} class slots",
@@ -219,8 +279,24 @@ impl Detector {
         height: u32,
         threshold: f32,
     ) -> Result<(Vec<Detection>, f32), String> {
+        let (boxes, timing) = self.analyse_timed(rgba, width, height, threshold)?;
+        Ok((boxes, timing.run_ms))
+    }
+
+    /// Runs one frame and splits the cost into preprocessing and the graph.
+    /// Preprocessing reads every source pixel, so folding it into the inference
+    /// number makes an expensive resize look like a slow model.
+    pub fn analyse_timed(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        threshold: f32,
+    ) -> Result<(Vec<Detection>, AnalysisTiming), String> {
         let size = self.input_size;
+        let preprocess_started = Instant::now();
         let data = preprocess(rgba, width, height, size);
+        let preprocess_ms = preprocess_started.elapsed().as_secs_f32() * 1000.0;
         let tensor = Tensor::from_array((
             [1usize, 3, size as usize, size as usize],
             data.into_boxed_slice(),
@@ -305,7 +381,13 @@ impl Detector {
 
         boxes.sort_by(|a, b| b.score.total_cmp(&a.score));
         boxes.truncate(100);
-        Ok((boxes, elapsed_ms))
+        Ok((
+            boxes,
+            AnalysisTiming {
+                preprocess_ms,
+                run_ms: elapsed_ms,
+            },
+        ))
     }
 }
 

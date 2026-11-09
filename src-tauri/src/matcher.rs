@@ -190,6 +190,8 @@ pub fn from_blob(blob: &[u8]) -> Option<Vec<f32>> {
 pub struct Pool {
     pub classes: Vec<ClassPool>,
     pub examples: usize,
+    /// Minimum score for a proposal to be drawn or harvested. Zero means off.
+    pub floor: f32,
 }
 
 pub struct ClassPool {
@@ -442,6 +444,14 @@ pub fn load_pool(conn: &rusqlite::Connection, project_id: i64) -> Result<Pool, S
             pool.examples += 1;
         }
     }
+    pool.floor = conn
+        .query_row(
+            "select match_floor from project where id = ?1",
+            rusqlite::params![project_id],
+            |row| row.get::<_, f32>(0),
+        )
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
     Ok(pool)
 }
 
@@ -666,6 +676,7 @@ mod tests {
                 },
             ],
             examples: 2,
+            floor: 0.0,
         };
         let hit = pool.classify(&candidate).expect("a perfect match should clear 0.9");
         assert_eq!(hit.name, "crate");
@@ -680,6 +691,7 @@ mod tests {
                 negatives: Vec::new(),
             }],
             examples: 1,
+            floor: 0.0,
         };
         assert!(unreachable.classify(&candidate).is_none());
     }
@@ -751,5 +763,32 @@ mod tests {
         let mut names = HashMap::new();
         names.insert(7, "crate".to_string());
         assert!(rank(&entries[0].embedding, &entries, &names).is_empty());
+    }
+}
+#[cfg(test)]
+mod floor_tests {
+    use super::load_pool;
+
+    fn schema(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "create table project (id integer primary key, match_floor real not null default 0.0);
+             create table class (id integer primary key, project_id integer not null, name text not null, threshold real not null);
+             create table example (id integer primary key, class_id integer not null, role text not null default 'positive', embedding blob, embedding_model text);",
+        )
+        .expect("schema");
+    }
+
+    #[test]
+    fn a_pool_reads_and_clamps_the_project_match_floor() {
+        let conn = rusqlite::Connection::open_in_memory().expect("memory db");
+        schema(&conn);
+        conn.execute("insert into project (id, match_floor) values (1, 0.7)", [])
+            .expect("project");
+        let pool = load_pool(&conn, 1).expect("pool");
+        assert!((pool.floor - 0.7).abs() < 1e-6, "floor was {}", pool.floor);
+
+        conn.execute("update project set match_floor = 4.0 where id = 1", [])
+            .expect("floor update");
+        assert_eq!(load_pool(&conn, 1).expect("pool").floor, 1.0);
     }
 }

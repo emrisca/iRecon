@@ -91,4 +91,18 @@
     background-color: var(--color-accent);
     color: var(--color-accent-foreground);
   }
+
+  /* Queue rows are uniform; skip layout and paint until they approach the
+     viewport instead of laying out every harvested candidate up front. */
+  .queue-row {
+    content-visibility: auto;
+    contain-intrinsic-size: 56px;
+  }
+
+  /* Library and example grids can hold hundreds of crops; keep offscreen
+     tiles out of layout and paint until they are scrolled into view. */
+  .media-tile {
+    content-visibility: auto;
+    contain-intrinsic-size: 180px;
+  }
 }
