@@ -159,8 +159,24 @@ pub struct ClassPool {
     pub id: i64,
     pub name: String,
     pub threshold: f32,
-    pub positives: Vec<Vec<f32>>,
+    /// Example id beside its unit-length fingerprint, so the review screen can
+    /// name the examples that made a candidate look interesting.
+    pub positives: Vec<(i64, Vec<f32>)>,
     pub negatives: Vec<Vec<f32>>,
+}
+
+impl ClassPool {
+    fn score(&self, candidate: &[f32]) -> f32 {
+        let mut positive = -1.0f32;
+        for (_, embedding) in &self.positives {
+            positive = positive.max(cosine(candidate, embedding));
+        }
+        let mut negative = 0.0f32;
+        for embedding in &self.negatives {
+            negative = negative.max(cosine(candidate, embedding).max(0.0));
+        }
+        (positive - negative).clamp(0.0, 1.0)
+    }
 }
 
 #[derive(Clone)]
@@ -176,23 +192,23 @@ impl Pool {
     /// positive example can never match, which keeps an empty project from
     /// drawing boxes.
     pub fn classify(&self, candidate: &[f32]) -> Option<LiveMatch> {
+        let best = self.best(candidate)?;
+        if best.score < best.threshold {
+            return None;
+        }
+        Some(best)
+    }
+
+    /// The best class score whether or not it clears that class's threshold.
+    /// Candidate harvesting uses it to find proposals that landed just under
+    /// the line: close enough to be worth asking about.
+    pub fn best(&self, candidate: &[f32]) -> Option<LiveMatch> {
         let mut best: Option<LiveMatch> = None;
         for class in &self.classes {
             if class.positives.is_empty() {
                 continue;
             }
-            let mut positive = -1.0f32;
-            for embedding in &class.positives {
-                positive = positive.max(cosine(candidate, embedding));
-            }
-            let mut negative = 0.0f32;
-            for embedding in &class.negatives {
-                negative = negative.max(cosine(candidate, embedding).max(0.0));
-            }
-            let score = (positive - negative).clamp(0.0, 1.0);
-            if score < class.threshold {
-                continue;
-            }
+            let score = class.score(candidate);
             let better = best
                 .as_ref()
                 .map(|current| score > current.score)
@@ -208,13 +224,34 @@ impl Pool {
         }
         best
     }
+
+    /// The examples nearest a candidate in one class, best first. The review
+    /// screen shows these beside the candidate so an answer is an informed one.
+    pub fn nearest(&self, candidate: &[f32], class_id: i64, limit: usize) -> Vec<(i64, f32)> {
+        let Some(class) = self.classes.iter().find(|class| class.id == class_id) else {
+            return Vec::new();
+        };
+        let mut scored: Vec<(i64, f32)> = class
+            .positives
+            .iter()
+            .map(|(id, embedding)| (*id, cosine(candidate, embedding)))
+            .collect();
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(limit);
+        scored
+    }
 }
 
 /// Loads every class and matchable example for one project.
 pub fn load_pool(conn: &rusqlite::Connection, project_id: i64) -> Result<Pool, String> {
     let mut statement = conn
         .prepare(
-            "select c.id, c.name, c.threshold, e.role, e.embedding
+            "select c.id, c.name, c.threshold, e.id, e.role, e.embedding
              from class c
              left join example e
                on e.class_id = c.id and e.embedding is not null and e.embedding_model = ?2
@@ -228,8 +265,9 @@ pub fn load_pool(conn: &rusqlite::Connection, project_id: i64) -> Result<Pool, S
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, f32>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -237,7 +275,7 @@ pub fn load_pool(conn: &rusqlite::Connection, project_id: i64) -> Result<Pool, S
     let mut pool = Pool::default();
     let mut current: Option<i64> = None;
     for row in rows {
-        let (id, name, threshold, role, blob) = row.map_err(|e| e.to_string())?;
+        let (id, name, threshold, example_id, role, blob) = row.map_err(|e| e.to_string())?;
         if current != Some(id) {
             pool.classes.push(ClassPool {
                 id,
@@ -255,10 +293,10 @@ pub fn load_pool(conn: &rusqlite::Connection, project_id: i64) -> Result<Pool, S
             continue;
         };
         if let Some(class) = pool.classes.last_mut() {
-            if role.as_deref() == Some("negative") {
-                class.negatives.push(embedding);
-            } else {
-                class.positives.push(embedding);
+            match (role.as_deref(), example_id) {
+                (Some("negative"), _) => class.negatives.push(embedding),
+                (_, Some(example_id)) => class.positives.push((example_id, embedding)),
+                _ => continue,
             }
             pool.examples += 1;
         }
@@ -470,14 +508,14 @@ mod tests {
                     id: 1,
                     name: "crate".into(),
                     threshold: 0.9,
-                    positives: vec![candidate.clone()],
+                    positives: vec![(1, candidate.clone())],
                     negatives: Vec::new(),
                 },
                 ClassPool {
                     id: 2,
                     name: "sky".into(),
                     threshold: 0.9,
-                    positives: vec![candidate.clone()],
+                    positives: vec![(1, candidate.clone())],
                     negatives: Vec::new(),
                 },
             ],
@@ -492,7 +530,7 @@ mod tests {
                 id: 3,
                 name: "crate".into(),
                 threshold: 1.1,
-                positives: vec![candidate.clone()],
+                positives: vec![(1, candidate.clone())],
                 negatives: Vec::new(),
             }],
             examples: 1,

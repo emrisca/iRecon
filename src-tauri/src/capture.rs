@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -18,6 +19,13 @@ const REPORT_INTERVAL: Duration = Duration::from_millis(500);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(800);
 const PREVIEW_WIDTH: u32 = 640;
 const SCORE_THRESHOLD: f32 = 0.35;
+/// How far under a class's threshold a proposal still counts as a candidate.
+/// Wider and the queue fills with junk; narrower and it only sees near misses
+/// that were about to match anyway.
+const HARVEST_BAND: f32 = 0.12;
+/// Candidates per capture session, so a bad pool cannot fill the disk.
+const HARVEST_CAP: u32 = 40;
+const HARVEST_INTERVAL: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,8 +96,10 @@ pub fn capture_start(
         return Ok(());
     }
 
-    let monitor = pick_monitor()?;
-    let label = monitor
+    // The handle is not `Send` on every platform (on Windows `xcap` holds a raw
+    // `HMONITOR`), so it is picked again inside the capture thread instead of
+    // being moved into it. The label decides which display the thread reads.
+    let label = pick_monitor()?
         .name()
         .unwrap_or_else(|_| "Primary display".to_string());
 
@@ -115,6 +125,31 @@ pub fn capture_start(
     thread::Builder::new()
         .name("irecon-capture".into())
         .spawn(move || {
+            let monitor = match pick_monitor() {
+                Ok(monitor) => monitor,
+                Err(error) => {
+                    if let Ok(mut guard) = stats.lock() {
+                        *guard = Some(CaptureStats {
+                            running: false,
+                            monitor: label.clone(),
+                            width: 0,
+                            height: 0,
+                            fps: 0.0,
+                            capture_ms: 0.0,
+                            inference_ms: 0.0,
+                            detections: 0,
+                            pool_classes: 0,
+                            pool_examples: 0,
+                            frames: 0,
+                            errors: 0,
+                            elapsed_s: 0.0,
+                            model: None,
+                            note: Some(error),
+                        });
+                    }
+                    return;
+                }
+            };
             let mut frames: u64 = 0;
             let mut errors: u64 = 0;
             let mut note: Option<String> = None;
@@ -130,6 +165,9 @@ pub fn capture_start(
             let mut pool = matcher::Pool::default();
             let mut pool_at = Instant::now() - Duration::from_secs(5);
             let mut tracker = Tracker::new();
+            let mut harvested: u32 = 0;
+            let mut last_harvest = Instant::now() - HARVEST_INTERVAL;
+            let mut harvest_root: Option<PathBuf> = None;
 
             while !stop_thread.load(Ordering::Relaxed) {
                 let tick = Instant::now();
@@ -201,12 +239,42 @@ pub fn capture_start(
                                                     &detection,
                                                 )?;
                                                 let candidate = matcher::embed(&crop);
-                                                let hit = pool.classify(&candidate)?;
-                                                Some(Detection {
-                                                    label: hit.name,
-                                                    score: hit.score,
-                                                    ..detection
-                                                })
+                                                if let Some(hit) = pool.classify(&candidate) {
+                                                    return Some(Detection {
+                                                        label: hit.name,
+                                                        score: hit.score,
+                                                        ..detection
+                                                    });
+                                                }
+
+                                                // A proposal just under its class's
+                                                // threshold is the one worth asking
+                                                // about, so it is saved for review.
+                                                if harvested < HARVEST_CAP
+                                                    && last_harvest.elapsed() >= HARVEST_INTERVAL
+                                                {
+                                                    if let Some(guess) = pool.best(&candidate) {
+                                                        if guess.score
+                                                            >= guess.threshold - HARVEST_BAND
+                                                            && guess.score < guess.threshold
+                                                        {
+                                                            if let Some(project) = project {
+                                                                if save_candidate(
+                                                                    &app_handle,
+                                                                    project,
+                                                                    guess.class_id,
+                                                                    guess.score,
+                                                                    &crop,
+                                                                    &mut harvest_root,
+                                                                ) {
+                                                                    harvested += 1;
+                                                                    last_harvest = Instant::now();
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                None
                                             })
                                             .collect();
                                         let tracked = tracker.update(matched);
@@ -328,6 +396,53 @@ pub fn capture_stop(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
         }
     }
     Ok(())
+}
+
+/// Writes one uncertain crop into the project's candidates folder and records
+/// it, so the review screen can ask about it later. Returns whether it landed.
+fn save_candidate(
+    app: &AppHandle,
+    project_id: i64,
+    class_id: i64,
+    score: f32,
+    crop: &image::RgbaImage,
+    root: &mut Option<PathBuf>,
+) -> bool {
+    if root.is_none() {
+        *root = crate::label::project_folder(app, project_id)
+            .ok()
+            .map(|(_, folder)| folder);
+    }
+    let Some(folder) = root.as_ref() else {
+        return false;
+    };
+    let candidates = folder.join("candidates");
+    if std::fs::create_dir_all(&candidates).is_err() {
+        return false;
+    }
+    let path = candidates.join(format!("{}-{class_id}.png", crate::label::now_millis()));
+    if crop
+        .save_with_format(&path, image::ImageFormat::Png)
+        .is_err()
+    {
+        return false;
+    }
+
+    let state = app.state::<AppState>();
+    let Ok(conn) = state.db.lock() else {
+        return false;
+    };
+    conn.execute(
+        "insert into candidate (project_id, class_id, path, score, state, created_at)
+         values (?1, ?2, ?3, ?4, 'pending', datetime('now'))",
+        rusqlite::params![
+            project_id,
+            class_id,
+            path.to_string_lossy().to_string(),
+            score
+        ],
+    )
+    .is_ok()
 }
 
 /// Crops a normalized detection out of a raw RGBA frame.

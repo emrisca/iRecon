@@ -1,0 +1,52 @@
+name: Release
+
+# Windows only: the app is Windows-first, and a Linux or macOS job would spend
+# minutes proving nothing this project ships.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build, sign and upload
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The key was generated without a password on purpose, so the runner
+          # only needs the key itself.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          tagName: v__VERSION__
+          releaseName: iRecon v__VERSION__
+          releaseBody: |
+            Windows build of iRecon. Existing installs pick this up through the
+            in-app update check once the release is published.
+          releaseDraft: true
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc

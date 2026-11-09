@@ -76,7 +76,30 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             created_at text not null
         );
 
+        create table if not exists source (
+            id integer primary key autoincrement,
+            project_id integer not null references project(id) on delete cascade,
+            kind text not null check (kind in ('display','window','file','folder')),
+            label text not null,
+            target text not null,
+            crop_x real, crop_y real, crop_w real, crop_h real,
+            created_at text not null
+        );
+
+        create table if not exists candidate (
+            id integer primary key autoincrement,
+            project_id integer not null references project(id) on delete cascade,
+            class_id integer not null references class(id) on delete cascade,
+            path text not null,
+            score real not null,
+            state text not null default 'pending'
+                check (state in ('pending','accepted','rejected','skipped')),
+            created_at text not null
+        );
+
         create index if not exists frame_project on frame(project_id);
+        create index if not exists source_project on source(project_id);
+        create index if not exists candidate_pending on candidate(project_id, state);
         create index if not exists class_project on class(project_id);
         create index if not exists example_class on example(class_id);",
     )?;

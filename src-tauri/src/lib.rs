@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
+pub mod advice;
 pub mod agent;
 pub mod capture;
 pub mod dataset;
@@ -9,9 +10,12 @@ pub mod db;
 pub mod detector;
 pub mod grab;
 pub mod label;
+pub mod library;
 pub mod matcher;
 pub mod model;
 pub mod overlay;
+pub mod review;
+pub mod source;
 pub mod tracker;
 
 pub struct AppState {
@@ -25,6 +29,8 @@ pub struct AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -51,15 +57,31 @@ pub fn run() {
             db::projects_list,
             db::project_create,
             db::project_delete,
+            advice::class_advice,
             label::frame_grab,
             label::classes_list,
             label::class_create,
+            label::class_update,
             label::class_threshold,
             label::class_delete,
             label::example_create,
             label::examples_list,
             label::match_region,
             label::examples_embed,
+            library::library_list,
+            library::library_frame,
+            library::library_import,
+            library::library_import_folder,
+            source::displays_list,
+            source::windows_list,
+            source::sources_list,
+            source::source_add,
+            source::source_crop,
+            source::source_delete,
+            source::source_preview,
+            review::candidates_list,
+            review::candidate_nearest,
+            review::candidate_resolve,
             dataset::dataset_export,
             agent::agent_snapshot,
             agent::agent_act,

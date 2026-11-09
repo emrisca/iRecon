@@ -22,7 +22,11 @@ use crate::capture::pick_monitor;
 const WINDOW_GONE_FRACTION: f32 = 0.004;
 
 /// A display the app can read pixels from.
-pub(crate) trait ScreenSource: Send + Sync {
+///
+/// The trait is deliberately not `Send` or `Sync`: a grab happens on the thread
+/// that asked for it, and `xcap::Monitor` is not `Send` on Windows because it
+/// wraps a raw `HMONITOR`. A backend that needs to cross threads wraps itself.
+pub(crate) trait ScreenSource {
     /// One frame of the display, in RGBA.
     fn capture(&self) -> Result<RgbaImage, String>;
 

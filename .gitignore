@@ -13,6 +13,9 @@ src-tauri/gen/schemas/
 models/
 datasets/
 
+# updater signing keys never leave the machine or the CI secret store
+.keys/
+
 # local app data if ever pointed at the repo
 *.sqlite
 *.sqlite-journal

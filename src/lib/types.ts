@@ -78,6 +78,7 @@ export type ExampleView = {
   height: number;
   preview: string;
   bbox: string;
+  role: "positive" | "negative";
   createdAt: string;
 };
 
@@ -128,4 +129,52 @@ export type DatasetExport = {
   classes: number;
   crops: number;
   skipped: number;
+};
+
+export type SourceKind = "display" | "window" | "file" | "folder";
+
+/** One display or window the source picker can offer. */
+export type CaptureTarget = {
+  target: string;
+  label: string;
+  detail: string;
+};
+
+export type SourceView = {
+  id: number;
+  projectId: number;
+  kind: SourceKind;
+  label: string;
+  target: string;
+  crop: Box | null;
+};
+
+export type ImportReport = {
+  imported: number;
+  skipped: number;
+  errors: string[];
+};
+
+export type ClassAdvice = {
+  classId: number;
+  name: string;
+  positives: number;
+  negatives: number;
+  similarity: number;
+  threshold: number;
+  suggested: number | null;
+  hints: string[];
+};
+
+export type CandidateView = {
+  id: number;
+  projectId: number;
+  classId: number;
+  className: string;
+  color: string;
+  path: string;
+  preview: string;
+  score: number;
+  state: "pending" | "accepted" | "rejected" | "skipped";
+  createdAt: string;
 };

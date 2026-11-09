@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Core defaults for the main window and the overlay",
   "windows": ["main", "overlay"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "updater:default", "process:default"]
 }

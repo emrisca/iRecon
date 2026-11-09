@@ -1,22 +1,33 @@
 import {
   Crosshair,
   FolderKanban,
-  Moon,
+  Images,
+  ListChecks,
   ScanLine,
-  Sun,
   Tags,
+  Waypoints,
   type LucideIcon,
 } from "lucide-react";
 
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
+import { SettingsMenu } from "./settings-menu";
 import { cn } from "../lib/utils";
 
-export type Section = "projects" | "label" | "capture";
+export type Section =
+  | "projects"
+  | "sources"
+  | "library"
+  | "review"
+  | "label"
+  | "capture";
 
 const items: Array<{ id: Section; label: string; icon: LucideIcon }> = [
   { id: "projects", label: "Projects", icon: FolderKanban },
+  { id: "sources", label: "Sources", icon: Waypoints },
+  { id: "library", label: "Library", icon: Images },
+  { id: "review", label: "Review", icon: ListChecks },
   { id: "label", label: "Label", icon: Tags },
   { id: "capture", label: "Capture lab", icon: ScanLine },
 ];
@@ -74,19 +85,7 @@ export function AppSidebar({ section, onSelect, theme, onToggleTheme }: SidebarP
       </nav>
 
       <div className="mt-auto flex flex-col gap-2 border-t border-border p-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="justify-start gap-2"
-          onClick={onToggleTheme}
-        >
-          {theme === "dark" ? (
-            <Moon className="size-4" aria-hidden="true" />
-          ) : (
-            <Sun className="size-4" aria-hidden="true" />
-          )}
-          {theme === "dark" ? "Dark" : "Light"}
-        </Button>
+        <SettingsMenu theme={theme} onToggleTheme={onToggleTheme} />
         <p className="px-2 text-xs text-muted-foreground">
           Frames stay on this machine.
         </p>

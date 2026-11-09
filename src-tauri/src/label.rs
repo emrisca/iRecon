@@ -55,17 +55,18 @@ pub struct ExampleView {
     pub height: u32,
     pub preview: String,
     pub bbox: String,
+    pub role: String,
     pub created_at: String,
 }
 
-fn now_millis() -> u128 {
+pub(crate) fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis())
         .unwrap_or(0)
 }
 
-fn data_url(image: &RgbaImage) -> String {
+pub(crate) fn png_data_url(image: &RgbaImage) -> String {
     let mut buffer = Vec::new();
     let mut cursor = Cursor::new(&mut buffer);
     if image.write_to(&mut cursor, ImageFormat::Png).is_err() {
@@ -77,10 +78,10 @@ fn data_url(image: &RgbaImage) -> String {
     )
 }
 
-fn preview(image: &RgbaImage) -> String {
+pub(crate) fn preview(image: &RgbaImage) -> String {
     let width = image.width();
     if width <= PREVIEW_WIDTH {
-        return data_url(image);
+        return png_data_url(image);
     }
     let scale = PREVIEW_WIDTH as f32 / width as f32;
     let height = ((image.height() as f32 * scale).round() as u32).max(1);
@@ -90,10 +91,13 @@ fn preview(image: &RgbaImage) -> String {
         height,
         image::imageops::FilterType::Triangle,
     );
-    data_url(&small)
+    png_data_url(&small)
 }
 
-fn project_folder(app: &AppHandle, project_id: i64) -> Result<(String, PathBuf), String> {
+pub(crate) fn project_folder(
+    app: &AppHandle,
+    project_id: i64,
+) -> Result<(String, PathBuf), String> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let slug: String = conn
@@ -268,6 +272,92 @@ pub fn class_create(app: AppHandle, project_id: i64, name: String) -> Result<Cla
     })
 }
 
+fn valid_color(value: &str) -> bool {
+    match value.strip_prefix('#') {
+        Some(hex) => hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()),
+        None => value.starts_with("oklch(") && value.ends_with(')'),
+    }
+}
+
+fn read_class(conn: &rusqlite::Connection, id: i64) -> Result<ClassView, String> {
+    conn.query_row(
+        "select c.id, c.name, c.color, c.threshold,
+                (select count(*) from example e where e.class_id = c.id)
+         from class c where c.id = ?1",
+        params![id],
+        |row| {
+            Ok(ClassView {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                color: row.get(2)?,
+                threshold: row.get(3)?,
+                examples: row.get(4)?,
+            })
+        },
+    )
+    .map_err(|_| "That class no longer exists".to_string())
+}
+
+/// Renames a class or changes its colour, or both. Names stay unique per
+/// project because the class name is how a crop is filed on disk.
+#[tauri::command]
+pub fn class_update(
+    app: AppHandle,
+    id: i64,
+    name: Option<String>,
+    color: Option<String>,
+) -> Result<ClassView, String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let project_id: i64 = conn
+        .query_row(
+            "select project_id from class where id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "That class no longer exists".to_string())?;
+
+    if let Some(name) = name {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("Give the class a name".into());
+        }
+        if name.chars().count() > 40 {
+            return Err("Keep the class name under 40 characters".into());
+        }
+        let clash: Option<i64> = conn
+            .query_row(
+                "select id from class
+                 where project_id = ?1 and lower(name) = lower(?2) and id != ?3",
+                params![project_id, name, id],
+                |row| row.get(0),
+            )
+            .ok();
+        if clash.is_some() {
+            return Err("A class with that name already exists".into());
+        }
+        conn.execute(
+            "update class set name = ?1 where id = ?2",
+            params![name, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(color) = color {
+        let color = color.trim().to_string();
+        if !valid_color(&color) {
+            return Err("Pick a colour from the palette".into());
+        }
+        conn.execute(
+            "update class set color = ?1 where id = ?2",
+            params![color, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    read_class(&conn, id)
+}
+
 #[tauri::command]
 pub fn class_threshold(app: AppHandle, id: i64, threshold: f32) -> Result<ClassView, String> {
     if !(0.0..=1.0).contains(&threshold) {
@@ -333,7 +423,12 @@ pub fn example_create(
     y: f32,
     w: f32,
     h: f32,
+    role: Option<String>,
 ) -> Result<ExampleView, String> {
+    let role = role.unwrap_or_else(|| "positive".to_string());
+    if role != "positive" && role != "negative" {
+        return Err("An example is a positive or a negative".into());
+    }
     let state = app.state::<AppState>();
     let (project_id, frame_path, class_name): (i64, String, String) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -389,14 +484,15 @@ pub fn example_create(
     conn.execute(
         "insert into example
            (class_id, frame_id, path, role, origin, bbox, embedding, embedding_model, created_at)
-         values (?1, ?2, ?3, 'positive', 'draw', ?4, ?5, ?6, datetime('now'))",
+         values (?1, ?2, ?3, ?7, 'draw', ?4, ?5, ?6, datetime('now'))",
         params![
             class_id,
             frame_id,
             path.to_string_lossy().to_string(),
             bbox,
             matcher::to_blob(&embedding),
-            matcher::EMBEDDING_MODEL
+            matcher::EMBEDDING_MODEL,
+            role
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -416,8 +512,9 @@ pub fn example_create(
         path: path.to_string_lossy().to_string(),
         width: crop.width(),
         height: crop.height(),
-        preview: data_url(&crop),
+        preview: png_data_url(&crop),
         bbox,
+        role,
         created_at,
     })
 }
@@ -428,7 +525,7 @@ pub fn examples_list(app: AppHandle, class_id: i64) -> Result<Vec<ExampleView>, 
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let mut statement = conn
         .prepare(
-            "select id, class_id, path, bbox, created_at from example
+            "select id, class_id, path, bbox, role, created_at from example
              where class_id = ?1 order by id desc",
         )
         .map_err(|e| e.to_string())?;
@@ -440,17 +537,18 @@ pub fn examples_list(app: AppHandle, class_id: i64) -> Result<Vec<ExampleView>, 
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?;
 
     let mut examples = Vec::new();
     for row in rows {
-        let (id, class_id, path, bbox, created_at) = row.map_err(|e| e.to_string())?;
+        let (id, class_id, path, bbox, role, created_at) = row.map_err(|e| e.to_string())?;
         let (width, height, preview) = match image::open(&path) {
             Ok(image) => {
                 let image = image.to_rgba8();
-                (image.width(), image.height(), data_url(&image))
+                (image.width(), image.height(), png_data_url(&image))
             }
             Err(_) => (0, 0, String::new()),
         };
@@ -462,6 +560,7 @@ pub fn examples_list(app: AppHandle, class_id: i64) -> Result<Vec<ExampleView>, 
             height,
             preview,
             bbox,
+            role,
             created_at,
         });
     }

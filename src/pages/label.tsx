@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type PointerEvent as ReactPointerEvent,
-  type ReactNode,
-} from "react";
+import { useEffect, useState } from "react";
 import {
   Crop,
   Download,
@@ -28,8 +21,12 @@ import {
 } from "../components/ui/card";
 import { Input } from "../components/ui/input";
 import { Skeleton } from "../components/ui/skeleton";
+import { Separator } from "../components/ui/separator";
+import { FrameStage } from "../components/frame-stage";
 import { PageHeader } from "../components/page-header";
 import {
+  CLASS_COLORS,
+  classAdvice,
   createClass,
   createExample,
   deleteClass,
@@ -39,13 +36,17 @@ import {
   isDesktop,
   listClasses,
   listExamples,
+  listFrames,
   listProjects,
   matchRegion,
+  openFrame,
   resetDemoData,
   setClassThreshold,
+  updateClass,
 } from "../lib/api";
 import type {
   Box,
+  ClassAdvice,
   ClassMatch,
   DatasetExport,
   ExampleView,
@@ -54,297 +55,18 @@ import type {
   Project,
 } from "../lib/types";
 
-const MIN_SCALE = 1;
-const MAX_SCALE = 12;
-
-type FrameStageProps = {
-  frame: FrameView;
-  box: Box | null;
-  onBox: (box: Box | null) => void;
-  action?: ReactNode;
-  className?: string;
-};
-
-function clamp01(value: number) {
-  return Math.min(1, Math.max(0, value));
-}
-
-function clampScale(value: number) {
-  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
-}
-
-/**
- * A small image viewer: wheel pans, Command or Control with the wheel zooms
- * around the pointer, Space-drag, right-drag or middle-drag pans, drag draws a
- * box, and double click fits the frame again. The picture is transformed with
- * CSS rather than resized, so zoom cannot feed back into layout and the box is
- * drawn in screen space so its border stays one pixel at any zoom.
- */
-function FrameStage({
-  frame,
-  box,
-  onBox,
-  action,
-  className = "h-[70vh]",
-}: FrameStageProps) {
-  const viewport = useRef<HTMLDivElement | null>(null);
-  const picture = useRef<HTMLImageElement | null>(null);
-  const [baseWidth, setBaseWidth] = useState(0);
-  const [scale, setScale] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [draft, setDraft] = useState<Box | null>(null);
-  const [panning, setPanning] = useState(false);
-  const drawStart = useRef<{ x: number; y: number } | null>(null);
-  const panStart = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
-  const spaceHeld = useRef(false);
-
-  const baseHeight = baseWidth > 0 ? (baseWidth * frame.height) / frame.width : 0;
-  const viewWidth = baseWidth * scale;
-  const viewHeight = baseHeight * scale;
-
-  useEffect(() => {
-    const element = viewport.current;
-    if (!element) return;
-    // Measured once per resize and capped at the window width, so a bad
-    // measurement can never ask for a bitmap wider than the screen.
-    const measure = () => setBaseWidth(Math.min(element.clientWidth, window.innerWidth));
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
-  }, [frame.id]);
-
-  const limit = useCallback((value: number, content: number, view: number) => {
-    const span = content - view;
-    return span <= 0 ? span / 2 : Math.min(0, Math.max(-span, value));
-  }, []);
-
-  const contain = useCallback(
-    (x: number, y: number, nextScale: number) => {
-      const element = viewport.current;
-      if (!element || baseWidth === 0) return { x, y };
-      return {
-        x: limit(x, baseWidth * nextScale, element.clientWidth),
-        y: limit(y, baseHeight * nextScale, element.clientHeight),
-      };
-    },
-    [baseWidth, baseHeight, limit]
-  );
-
-  useEffect(() => {
-    setOffset((current) => contain(current.x, current.y, scale));
-  }, [scale, baseWidth, contain]);
-
-  useEffect(() => {
-    const element = viewport.current;
-    if (!element) return;
-    const onWheel = (event: WheelEvent) => {
-      if (baseWidth === 0) return;
-      event.preventDefault();
-      if (event.ctrlKey || event.metaKey) {
-        const next = clampScale(scale * Math.exp(-event.deltaY * 0.0022));
-        if (next === scale) return;
-        const rect = element.getBoundingClientRect();
-        const px = event.clientX - rect.left;
-        const py = event.clientY - rect.top;
-        const factor = next / scale;
-        setOffset(contain(px - (px - offset.x) * factor, py - (py - offset.y) * factor, next));
-        setScale(next);
-        return;
-      }
-      setOffset(contain(offset.x - event.deltaX, offset.y - event.deltaY, scale));
-    };
-    element.addEventListener("wheel", onWheel, { passive: false });
-    return () => element.removeEventListener("wheel", onWheel);
-  }, [baseWidth, scale, offset, contain]);
-
-  useEffect(() => {
-    const onDown = (event: KeyboardEvent) => {
-      if (event.code === "Space") spaceHeld.current = true;
-    };
-    const onUp = (event: KeyboardEvent) => {
-      if (event.code === "Space") spaceHeld.current = false;
-    };
-    window.addEventListener("keydown", onDown);
-    window.addEventListener("keyup", onUp);
-    return () => {
-      window.removeEventListener("keydown", onDown);
-      window.removeEventListener("keyup", onUp);
-    };
-  }, []);
-
-  function normalized(clientX: number, clientY: number) {
-    const element = picture.current;
-    if (!element) return { x: 0, y: 0 };
-    const rect = element.getBoundingClientRect();
-    return {
-      x: clamp01((clientX - rect.left) / rect.width),
-      y: clamp01((clientY - rect.top) / rect.height),
-    };
-  }
-
-  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // A pointer that already left the window cannot be captured; the drag
-      // still works from the events that do arrive.
-    }
-    const pan = event.button === 1 || event.button === 2 || event.altKey || spaceHeld.current;
-    if (pan) {
-      panStart.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y };
-      setPanning(true);
-      return;
-    }
-    if (event.button !== 0) return;
-    const at = normalized(event.clientX, event.clientY);
-    drawStart.current = at;
-    onBox(null);
-    setDraft({ x: at.x, y: at.y, w: 0, h: 0 });
-  }
-
-  function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    if (panStart.current) {
-      const start = panStart.current;
-      setOffset(
-        contain(start.ox + (event.clientX - start.x), start.oy + (event.clientY - start.y), scale)
-      );
-      return;
-    }
-    if (!drawStart.current) return;
-    const at = normalized(event.clientX, event.clientY);
-    const from = drawStart.current;
-    setDraft({
-      x: Math.min(from.x, at.x),
-      y: Math.min(from.y, at.y),
-      w: Math.abs(at.x - from.x),
-      h: Math.abs(at.y - from.y),
-    });
-  }
-
-  function onPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
-    if (panStart.current) {
-      panStart.current = null;
-      setPanning(false);
-      return;
-    }
-    const from = drawStart.current;
-    drawStart.current = null;
-    setDraft(null);
-    if (!from) return;
-    const at = normalized(event.clientX, event.clientY);
-    const next = {
-      x: Math.min(from.x, at.x),
-      y: Math.min(from.y, at.y),
-      w: Math.abs(at.x - from.x),
-      h: Math.abs(at.y - from.y),
-    };
-    if (next.w > 0.004 && next.h > 0.004) {
-      onBox(next);
-    }
-  }
-
-  function zoomBy(factor: number) {
-    const element = viewport.current;
-    if (!element) return;
-    const next = clampScale(scale * factor);
-    if (next === scale) return;
-    const cx = element.clientWidth / 2;
-    const cy = element.clientHeight / 2;
-    const k = next / scale;
-    setOffset(contain(cx - (cx - offset.x) * k, cy - (cy - offset.y) * k, next));
-    setScale(next);
-  }
-
-  function fit() {
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
-  }
-
-  const active = draft ?? box;
-
+function ExampleTile({ example }: { example: ExampleView }) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <div
-        ref={viewport}
-        className={`relative overflow-hidden rounded-md border border-border bg-muted ${className}`}
-        style={{ cursor: panning ? "grabbing" : "crosshair" }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={() => {
-          drawStart.current = null;
-          panStart.current = null;
-          setDraft(null);
-          setPanning(false);
-        }}
-        onDoubleClick={fit}
-        onContextMenu={(event) => event.preventDefault()}
-      >
-        <div
-          className="relative origin-top-left"
-          style={{
-            width: baseWidth || 1,
-            height: baseHeight || 1,
-            transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-          }}
-        >
-          <img
-            ref={picture}
-            src={frame.preview}
-            alt="Grabbed frame"
-            draggable={false}
-            className="pointer-events-none block h-full w-full select-none"
-          />
-        </div>
-        {active ? (
-          <div
-            className="pointer-events-none absolute border border-white ring-1 ring-black/60"
-            style={{
-              left: offset.x + active.x * viewWidth,
-              top: offset.y + active.y * viewHeight,
-              width: active.w * viewWidth,
-              height: active.h * viewHeight,
-            }}
-          />
-        ) : null}
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
-          <Button
-            size="sm"
-            variant="outline"
-            aria-label="Zoom out"
-            disabled={scale <= MIN_SCALE}
-            onClick={() => zoomBy(1 / 1.4)}
-          >
-            <Minus className="size-4" aria-hidden="true" />
-          </Button>
-          <Badge variant="outline" className="min-w-14 justify-center tabular-nums">
-            {Math.round(scale * 100)}%
-          </Badge>
-          <Button
-            size="sm"
-            variant="outline"
-            aria-label="Zoom in"
-            disabled={scale >= MAX_SCALE}
-            onClick={() => zoomBy(1.4)}
-          >
-            <Plus className="size-4" aria-hidden="true" />
-          </Button>
-          <Button size="sm" variant="ghost" onClick={fit}>
-            Fit
-          </Button>
-        </div>
-        {action}
-      </div>
-    </div>
+    <li className="flex flex-col gap-1.5">
+      <img
+        src={example.preview}
+        alt={`Example from ${example.createdAt}`}
+        className="aspect-square w-full rounded-md border border-border object-cover"
+      />
+      <span className="truncate text-xs text-muted-foreground tabular-nums">
+        {example.width} by {example.height}
+      </span>
+    </li>
   );
 }
 
@@ -363,6 +85,10 @@ export function LabelPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  const [role, setRole] = useState<"positive" | "negative">("positive");
+  const [library, setLibrary] = useState<FrameView[]>([]);
+  const [rename, setRename] = useState("");
+  const [advice, setAdvice] = useState<ClassAdvice[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -380,6 +106,41 @@ export function LabelPage() {
     };
   }, []);
 
+  // Coverage and threshold advice follow the class list, so every save or
+  // threshold change refreshes it without a separate button.
+  useEffect(() => {
+    if (!projectId) {
+      setAdvice([]);
+      return;
+    }
+    let alive = true;
+    classAdvice(projectId)
+      .then((rows) => {
+        if (alive) setAdvice(rows);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [projectId, classes]);
+
+  async function applyAdvice(entry: ClassAdvice) {
+    if (!projectId || entry.suggested === null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await setClassThreshold(entry.classId, entry.suggested);
+      setClasses((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item))
+      );
+      setSelected((current) => (current?.id === updated.id ? updated : current));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (!projectId) {
       setClasses([]);
@@ -396,6 +157,13 @@ export function LabelPage() {
     // Examples saved before the matcher existed carry no fingerprint; filling
     // them in here keeps the first box already comparable.
     embedExamples(projectId).catch(() => {});
+    listFrames(projectId)
+      .then((rows) => {
+        if (alive) setLibrary(rows);
+      })
+      .catch(() => {
+        if (alive) setLibrary([]);
+      });
     setFrame(null);
     setBox(null);
     setFullscreen(false);
@@ -404,6 +172,8 @@ export function LabelPage() {
     setMatches([]);
     setExportInfo(null);
     setClassName("");
+    setRole("positive");
+    setRename("");
     return () => {
       alive = false;
     };
@@ -425,6 +195,10 @@ export function LabelPage() {
     return () => {
       alive = false;
     };
+  }, [selected]);
+
+  useEffect(() => {
+    setRename(selected?.name ?? "");
   }, [selected]);
 
   useEffect(() => {
@@ -487,6 +261,21 @@ export function LabelPage() {
       const next = await grabFrame(projectId);
       setFrame(next);
       setBox(null);
+      setLibrary((current) => [next, ...current]);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function open(id: number) {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await openFrame(id);
+      setFrame(next);
+      setBox(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -505,7 +294,7 @@ export function LabelPage() {
       if (!target) {
         target = await createClass(projectId, name);
       }
-      const created = await createExample(target.id, frame.id, box);
+      const created = await createExample(target.id, frame.id, box, role);
       setBox(null);
       setSelected(target);
       setExamples((current) => [created, ...current]);
@@ -563,6 +352,43 @@ export function LabelPage() {
     }
   }
 
+  async function renameSelected(item: LabelClass) {
+    const name = rename.trim();
+    if (!name || name === item.name) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await updateClass(item.id, { name });
+      setClasses((current) =>
+        current.map((entry) => (entry.id === updated.id ? updated : entry))
+      );
+      setSelected(updated);
+      setClassName(updated.name);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recolour(item: LabelClass, color: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await updateClass(item.id, { color });
+      setClasses((current) =>
+        current.map((entry) => (entry.id === updated.id ? updated : entry))
+      );
+      setSelected(updated);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const positives = examples.filter((example) => example.role !== "negative");
+  const negatives = examples.filter((example) => example.role === "negative");
   const projectName = projects.find((project) => project.id === projectId)?.name;
   const fullscreenButton = (
     <Button
@@ -651,6 +477,27 @@ export function LabelPage() {
               ) : (
                 <Skeleton className="aspect-video w-full" />
               )}
+              {library.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-muted-foreground">Library</span>
+                  {library.slice(0, 8).map((entry) => (
+                    <Button
+                      key={entry.id}
+                      size="icon"
+                      variant={frame?.id === entry.id ? "secondary" : "outline"}
+                      aria-label={`Open frame ${entry.id}`}
+                      disabled={busy}
+                      onClick={() => open(entry.id)}
+                    >
+                      <img
+                        src={entry.preview}
+                        alt=""
+                        className="size-8 rounded-sm object-cover"
+                      />
+                    </Button>
+                  ))}
+                </div>
+              ) : null}
               <div className="flex flex-col gap-2">
                 <p className="text-xs text-muted-foreground">
                   {frame
@@ -725,6 +572,7 @@ export function LabelPage() {
                         onClick={() => {
                           setClassName(item.name);
                           setSelected(item);
+                          setRename(item.name);
                         }}
                       >
                         <span
@@ -766,16 +614,96 @@ export function LabelPage() {
                   No classes yet. The first save creates one.
                 </p>
               )}
-              <Button
-                size="sm"
-                disabled={!frame || !box || !className.trim() || busy}
-                onClick={save}
-              >
-                Save example
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant={role === "positive" ? "secondary" : "outline"}
+                  onClick={() => setRole("positive")}
+                >
+                  Positive
+                </Button>
+                <Button
+                  size="sm"
+                  variant={role === "negative" ? "secondary" : "outline"}
+                  onClick={() => setRole("negative")}
+                >
+                  Negative
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={!frame || !box || !className.trim() || busy}
+                  onClick={save}
+                >
+                  Save example
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {role === "positive"
+                  ? "A positive is the thing itself, which is what teaches the matcher to box it."
+                  : "A negative looks close but is not it, so saving one raises the bar for a match."}
+              </p>
             </CardContent>
           </Card>
         </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Coverage</CardTitle>
+            <CardDescription>
+              What the saved examples say about each class. The suggestion is the
+              midpoint between how alike your positives are and how close the nearest
+              negative sits; nothing changes until you apply it.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {advice.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No classes to read yet.
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-2">
+                {advice.map((entry) => (
+                  <li key={entry.classId} className="rounded-lg border border-border p-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium">{entry.name}</span>
+                      <Badge variant="secondary" className="tabular-nums">
+                        {entry.positives} positive{entry.positives === 1 ? "" : "s"}
+                      </Badge>
+                      <Badge variant="outline" className="tabular-nums">
+                        {entry.negatives} negative{entry.negatives === 1 ? "" : "s"}
+                      </Badge>
+                      {entry.positives >= 2 ? (
+                        <Badge variant="outline" className="tabular-nums">
+                          look-alike {Math.round(entry.similarity * 100)}%
+                        </Badge>
+                      ) : null}
+                      {entry.suggested !== null ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="ml-auto tabular-nums"
+                          disabled={busy || entry.suggested === entry.threshold}
+                          onClick={() => applyAdvice(entry)}
+                        >
+                          Use {Math.round(entry.suggested * 100)}%
+                        </Button>
+                      ) : null}
+                    </div>
+                    {entry.hints.length > 0 ? (
+                      <ul className="mt-1 flex list-disc flex-col gap-0.5 pl-4 text-xs text-muted-foreground">
+                        {entry.hints.map((hint) => (
+                          <li key={hint}>{hint}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-1 text-xs text-muted-foreground">Looks healthy.</p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
 
         {selected ? (
           <Card>
@@ -783,8 +711,9 @@ export function LabelPage() {
               <div className="flex flex-col gap-1.5">
                 <CardTitle>{selected.name}</CardTitle>
                 <CardDescription>
-                  {examples.length} examples. A box must score at least{" "}
-                  {Math.round(selected.threshold * 100)}% against this class to be drawn.
+                  {positives.length} positives and {negatives.length} negatives. A box must
+                  score at least {Math.round(selected.threshold * 100)}% against this class
+                  to be drawn.
                 </CardDescription>
               </div>
               <div className="flex items-center gap-1.5">
@@ -812,26 +741,71 @@ export function LabelPage() {
                 </Button>
               </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  value={rename}
+                  onChange={(event) => setRename(event.target.value)}
+                  aria-label={`Rename ${selected.name}`}
+                  maxLength={40}
+                  className="max-w-56"
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !rename.trim() || rename.trim() === selected.name}
+                  onClick={() => renameSelected(selected)}
+                >
+                  Rename
+                </Button>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {CLASS_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      aria-label={`Colour ${selected.name}`}
+                      aria-pressed={selected.color === color}
+                      className="size-6 rounded-full border border-border aria-pressed:ring-1 aria-pressed:ring-foreground"
+                      style={{ backgroundColor: color }}
+                      disabled={busy}
+                      onClick={() => recolour(selected, color)}
+                    />
+                  ))}
+                </div>
+              </div>
+              <Separator />
               {examples.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   No examples saved for this class yet.
                 </p>
               ) : (
-                <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
-                  {examples.map((example) => (
-                    <li key={example.id} className="flex flex-col gap-1.5">
-                      <img
-                        src={example.preview}
-                        alt={`Example from ${example.createdAt}`}
-                        className="aspect-square w-full rounded-md border border-border object-cover"
-                      />
-                      <span className="truncate text-xs text-muted-foreground tabular-nums">
-                        {example.width} by {example.height}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                <div className="flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Positives</span>
+                    <Badge variant="secondary" className="tabular-nums">
+                      {positives.length}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">Negatives</span>
+                    <Badge variant="outline" className="tabular-nums">
+                      {negatives.length}
+                    </Badge>
+                  </div>
+                  <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+                    {positives.map((example) => (
+                      <ExampleTile key={example.id} example={example} />
+                    ))}
+                  </ul>
+                  {negatives.length > 0 ? (
+                    <>
+                      <span className="text-xs text-muted-foreground">Negatives</span>
+                      <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+                        {negatives.map((example) => (
+                          <ExampleTile key={example.id} example={example} />
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
+                </div>
               )}
             </CardContent>
           </Card>

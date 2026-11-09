@@ -1,0 +1,5 @@
+# The Windows build needs the MSVC ABI. The GNU toolchain installed on this
+# machine has no dlltool, and Tauri expects MSVC on Windows anyway. On macOS
+# change the channel to "stable" or delete this file.
+[toolchain]
+channel = "stable-x86_64-pc-windows-msvc"

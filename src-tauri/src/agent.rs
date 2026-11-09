@@ -236,6 +236,10 @@ fn run(app: &AppHandle, project_id: i64, action: &str, payload: &Value) -> Resul
                 number(payload, "y")?,
                 number(payload, "w")?,
                 number(payload, "h")?,
+                payload
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             )?;
             serde_json::to_value(example).map_err(|e| e.to_string())
         }

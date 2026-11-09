@@ -41,6 +41,7 @@ struct ExampleRow {
     frame: Option<String>,
     width: Option<i64>,
     height: Option<i64>,
+    role: String,
 }
 
 fn now_millis() -> u128 {
@@ -72,7 +73,8 @@ fn parse_box(raw: &str) -> Option<NormalizedBox> {
 fn query_examples(conn: &Connection, project_id: i64) -> Result<Vec<ExampleRow>, String> {
     let mut statement = conn
         .prepare(
-            "select e.id, e.class_id, e.bbox, e.frame_id, e.path, f.path, f.width, f.height
+            "select e.id, e.class_id, e.bbox, e.frame_id, e.path, f.path, f.width, f.height,
+                    e.role
              from example e
              join class c on c.id = e.class_id
              left join frame f on f.id = e.frame_id
@@ -91,6 +93,7 @@ fn query_examples(conn: &Connection, project_id: i64) -> Result<Vec<ExampleRow>,
                 frame: row.get(5)?,
                 width: row.get(6)?,
                 height: row.get(7)?,
+                role: row.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -164,6 +167,12 @@ pub(crate) fn write_dataset(
                     crops += 1;
                 }
             }
+        }
+
+        // A negative keeps its crop, because it is useful as a classification
+        // input, but it is not a box and must never be written as one.
+        if row.role == "negative" {
+            continue;
         }
 
         let Some(frame_id) = row.frame_id else {

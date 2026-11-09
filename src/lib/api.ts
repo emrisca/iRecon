@@ -2,17 +2,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Box,
+  CandidateView,
+  ClassAdvice,
   CaptureStats,
+  CaptureTarget,
   ClassMatch,
   DatasetExport,
   DetectionPayload,
   ExampleView,
   FramePayload,
   FrameView,
+  ImportReport,
   LabelClass,
   ModelCatalog,
   ModelProgress,
   Project,
+  SourceKind,
+  SourceView,
 } from "./types";
 
 export const isDesktop =
@@ -65,6 +71,7 @@ function demoExample(classId: number, color: string, index: number): ExampleView
     height: 84 + (index % 4) * 9,
     preview: demoPreview(color, index),
     bbox: "0,0,1,1",
+    role: "positive",
     createdAt: new Date(Date.now() - index * 60_000).toISOString(),
   };
 }
@@ -124,8 +131,13 @@ export async function resetDemoData(): Promise<void> {
   demoClasses.clear();
   demoExamples.clear();
   demoAnchors.clear();
+  demoLibrary.clear();
+  demoSources.clear();
+  demoCandidates.clear();
   demoClassId = 1;
   demoExampleId = 1;
+  demoSourceId = 1;
+  demoCandidateId = 1;
   seedDemoProject();
 }
 
@@ -152,6 +164,16 @@ export async function deleteProject(id: number): Promise<void> {
 }
 
 let demoFrameId = 1;
+let demoLibrary = new Map<number, FrameView[]>();
+
+function demoLibraryFor(projectId: number): FrameView[] {
+  let rows = demoLibrary.get(projectId);
+  if (!rows) {
+    rows = [demoFrame(), demoFrame()];
+    demoLibrary.set(projectId, rows);
+  }
+  return rows;
+}
 
 /** A stand-in frame so the labeling and zoom controls can be exercised in a browser. */
 function demoFrame(): FrameView {
@@ -169,7 +191,11 @@ function demoFrame(): FrameView {
 }
 
 export async function grabFrame(projectId: number): Promise<FrameView> {
-  if (!isDesktop) return demoFrame();
+  if (!isDesktop) {
+    const frame = demoFrame();
+    demoLibrary.set(projectId, [frame, ...demoLibraryFor(projectId)]);
+    return frame;
+  }
   return invoke<FrameView>("frame_grab", { projectId });
 }
 
@@ -232,7 +258,8 @@ export async function setClassThreshold(
 export async function createExample(
   classId: number,
   frameId: number,
-  box: Box
+  box: Box,
+  role: "positive" | "negative" = "positive"
 ): Promise<ExampleView> {
   if (!isDesktop) {
     const target = demoClassById(classId);
@@ -245,6 +272,7 @@ export async function createExample(
       height: Math.max(8, Math.round(box.h * 900)),
       preview: demoPreview(target.color, target.examples),
       bbox: `${box.x},${box.y},${box.w},${box.h}`,
+      role,
       createdAt: new Date().toISOString(),
     };
     const rows = demoExamples.get(classId) ?? [];
@@ -259,6 +287,7 @@ export async function createExample(
     y: box.y,
     w: box.w,
     h: box.h,
+    role,
   });
 }
 
@@ -388,4 +417,283 @@ export async function exportDataset(projectId: number): Promise<DatasetExport> {
 export async function embedExamples(projectId: number): Promise<number> {
   if (!isDesktop) return 0;
   return invoke<number>("examples_embed", { projectId });
+}
+
+/** The palette class colours come from, kept in step with the Rust side. */
+export const CLASS_COLORS = [
+  "oklch(0.62 0.11 250)",
+  "oklch(0.62 0.11 160)",
+  "oklch(0.62 0.11 25)",
+  "oklch(0.62 0.11 300)",
+  "oklch(0.62 0.11 200)",
+  "oklch(0.62 0.11 90)",
+  "oklch(0.62 0.11 340)",
+  "oklch(0.62 0.11 45)",
+];
+
+export async function updateClass(
+  id: number,
+  patch: { name?: string; color?: string }
+): Promise<LabelClass> {
+  if (!isDesktop) {
+    const target = demoClassById(id);
+    if (!target) throw new Error("That class is not in this project");
+    if (patch.name) target.name = patch.name;
+    if (patch.color) target.color = patch.color;
+    return { ...target };
+  }
+  return invoke<LabelClass>("class_update", {
+    id,
+    name: patch.name ?? null,
+    color: patch.color ?? null,
+  });
+}
+
+export async function classAdvice(projectId: number): Promise<ClassAdvice[]> {
+  if (!isDesktop) {
+    return (demoClasses.get(projectId) ?? []).map((entry) => {
+      const rows = demoExamples.get(entry.id) ?? [];
+      const positives = rows.filter((row) => row.role === "positive").length;
+      const negatives = rows.length - positives;
+      const hints: string[] = [];
+      if (positives === 0) {
+        hints.push("No positive example yet, so this class cannot match anything.");
+      } else if (positives < 3) {
+        hints.push(
+          `Only ${positives} positive${positives === 1 ? "" : "s"}. Three is the minimum for a stable pool.`
+        );
+      }
+      if (positives > 0 && negatives === 0) {
+        hints.push("No negatives yet, so look-alike objects cannot be separated.");
+      }
+      return {
+        classId: entry.id,
+        name: entry.name,
+        positives,
+        negatives,
+        similarity: 0.94,
+        threshold: entry.threshold,
+        suggested: positives >= 3 ? 0.8 : null,
+        hints,
+      };
+    });
+  }
+  return invoke<ClassAdvice[]>("class_advice", { projectId });
+}
+
+export async function listFrames(projectId: number): Promise<FrameView[]> {
+  if (!isDesktop) return demoLibraryFor(projectId).map((frame) => ({ ...frame }));
+  return invoke<FrameView[]>("library_list", { projectId });
+}
+
+export async function openFrame(frameId: number): Promise<FrameView> {
+  if (!isDesktop) {
+    for (const rows of demoLibrary.values()) {
+      const found = rows.find((frame) => frame.id === frameId);
+      if (found) return { ...found };
+    }
+    throw new Error("That frame is gone");
+  }
+  return invoke<FrameView>("library_frame", { frameId });
+}
+
+export async function importImages(
+  projectId: number,
+  paths: string[]
+): Promise<ImportReport> {
+  if (!isDesktop) {
+    const rows = demoLibraryFor(projectId);
+    for (const path of paths) {
+      const name = path.split(/[\\/]/).filter(Boolean).pop() ?? "frame.png";
+      rows.unshift({ ...demoFrame(), path: name });
+    }
+    return { imported: paths.length, skipped: 0, errors: [] };
+  }
+  return invoke<ImportReport>("library_import", { projectId, paths });
+}
+
+export async function importFolder(
+  projectId: number,
+  folder: string
+): Promise<ImportReport> {
+  if (!isDesktop) {
+    const rows = demoLibraryFor(projectId);
+    const name = folder.split(/[\\/]/).filter(Boolean).pop() ?? "folder";
+    for (let index = 0; index < 3; index += 1) {
+      rows.unshift({ ...demoFrame(), path: `${name}/${index + 1}.png` });
+    }
+    return { imported: 3, skipped: 0, errors: [] };
+  }
+  return invoke<ImportReport>("library_import_folder", { projectId, folder });
+}
+
+let demoSources = new Map<number, SourceView[]>();
+let demoSourceId = 1;
+
+const DEMO_TARGETS: Record<"display" | "window", CaptureTarget[]> = {
+  display: [{ target: "display-1", label: "Built-in display", detail: "1600 by 900, primary" }],
+  window: [{ target: "window-1", label: "Demo window", detail: "Demo app, 1280 by 720" }],
+};
+
+export async function listDisplays(): Promise<CaptureTarget[]> {
+  if (!isDesktop) return DEMO_TARGETS.display;
+  return invoke<CaptureTarget[]>("displays_list");
+}
+
+export async function listWindows(): Promise<CaptureTarget[]> {
+  if (!isDesktop) return DEMO_TARGETS.window;
+  return invoke<CaptureTarget[]>("windows_list");
+}
+
+export async function listSources(projectId: number): Promise<SourceView[]> {
+  if (!isDesktop) return (demoSources.get(projectId) ?? []).map((entry) => ({ ...entry }));
+  return invoke<SourceView[]>("sources_list", { projectId });
+}
+
+export async function addSource(
+  projectId: number,
+  kind: SourceKind,
+  target: string,
+  label?: string
+): Promise<SourceView> {
+  if (!isDesktop) {
+    const rows = demoSources.get(projectId) ?? [];
+    const existing = rows.find((entry) => entry.kind === kind && entry.target === target);
+    if (existing) return { ...existing };
+    const created: SourceView = {
+      id: demoSourceId++,
+      projectId,
+      kind,
+      label: label?.trim() || target,
+      target,
+      crop: null,
+    };
+    demoSources.set(projectId, [...rows, created]);
+    return { ...created };
+  }
+  return invoke<SourceView>("source_add", { projectId, kind, target, label });
+}
+
+export async function setSourceCrop(id: number, crop: Box | null): Promise<SourceView> {
+  if (!isDesktop) {
+    for (const rows of demoSources.values()) {
+      const found = rows.find((entry) => entry.id === id);
+      if (found) {
+        found.crop = crop ? { ...crop } : null;
+        return { ...found };
+      }
+    }
+    throw new Error("That source no longer exists");
+  }
+  return invoke<SourceView>("source_crop", { id, crop });
+}
+
+export async function deleteSource(id: number): Promise<void> {
+  if (!isDesktop) {
+    for (const [projectId, rows] of demoSources) {
+      demoSources.set(
+        projectId,
+        rows.filter((entry) => entry.id !== id)
+      );
+    }
+    return;
+  }
+  await invoke("source_delete", { id });
+}
+
+let demoCandidates = new Map<number, CandidateView[]>();
+let demoCandidateId = 1;
+
+function demoCandidatesFor(projectId: number): CandidateView[] {
+  let rows = demoCandidates.get(projectId);
+  if (!rows) {
+    const classes = demoClasses.get(projectId) ?? [];
+    rows = classes.slice(0, 2).map((entry, index) => ({
+      id: demoCandidateId++,
+      projectId,
+      classId: entry.id,
+      className: entry.name,
+      color: entry.color,
+      path: `candidates/${entry.id}/${index + 1}.png`,
+      preview: demoPreview(entry.color, index + 2),
+      score: 0.72 + index * 0.06,
+      state: "pending" as const,
+      createdAt: new Date(Date.now() - index * 90_000).toISOString(),
+    }));
+    demoCandidates.set(projectId, rows);
+  }
+  return rows;
+}
+
+export async function listCandidates(
+  projectId: number,
+  state?: string
+): Promise<CandidateView[]> {
+  if (!isDesktop) {
+    return demoCandidatesFor(projectId)
+      .filter((entry) => !state || entry.state === state)
+      .map((entry) => ({ ...entry }));
+  }
+  return invoke<CandidateView[]>("candidates_list", { projectId, state: state ?? null });
+}
+
+export async function nearestExamples(id: number, limit = 3): Promise<ExampleView[]> {
+  if (!isDesktop) {
+    for (const rows of demoCandidates.values()) {
+      const found = rows.find((entry) => entry.id === id);
+      if (found) {
+        return (demoExamples.get(found.classId) ?? [])
+          .slice(0, limit)
+          .map((entry) => ({ ...entry }));
+      }
+    }
+    return [];
+  }
+  return invoke<ExampleView[]>("candidate_nearest", { id, limit });
+}
+
+export async function resolveCandidate(
+  id: number,
+  decision: "accept" | "reject" | "skip",
+  classId?: number
+): Promise<void> {
+  if (!isDesktop) {
+    for (const rows of demoCandidates.values()) {
+      const found = rows.find((entry) => entry.id === id);
+      if (!found) continue;
+      if (decision === "skip") {
+        found.state = "skipped";
+        return;
+      }
+      found.state = decision === "accept" ? "accepted" : "rejected";
+      const target = demoClassById(classId ?? found.classId);
+      if (target) {
+        const example: ExampleView = {
+          id: demoExampleId++,
+          classId: target.id,
+          path: `examples/${target.id}/harvest.png`,
+          width: 120,
+          height: 96,
+          preview: demoPreview(target.color, target.examples),
+          bbox: "",
+          role: decision === "accept" ? "positive" : "negative",
+          createdAt: new Date().toISOString(),
+        };
+        const classRows = demoExamples.get(target.id) ?? [];
+        demoExamples.set(target.id, [example, ...classRows]);
+        target.examples = classRows.length + 1;
+      }
+      return;
+    }
+    return;
+  }
+  await invoke("candidate_resolve", { id, decision, classId: classId ?? null });
+}
+
+export async function previewSource(id: number): Promise<FramePayload> {
+  if (!isDesktop) {
+    const frame = demoFrame();
+    return { data: frame.preview, width: frame.width, height: frame.height };
+  }
+  return invoke<FramePayload>("source_preview", { id });
 }
