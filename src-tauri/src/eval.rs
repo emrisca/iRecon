@@ -198,29 +198,55 @@ pub fn evaluate_frames(
         let mut matched_class_ids: HashSet<i64> = HashSet::new();
         let mut best_score: Option<f32> = None;
         let mut best_class: Option<String> = None;
-        let mut scored: Vec<(Detection, matcher::LiveMatch)> = Vec::new();
-        let mut primary_proposals = 0usize;
+        let mut primary = Vec::new();
+        let mut secondary = Vec::new();
         for detection in &boxes {
             if detection.w * detection.h >= matcher::MAX_PROPOSAL_AREA {
                 continue;
             }
             if detection.score >= SCORE_THRESHOLD {
-                primary_proposals += 1;
+                primary.push(detection.clone());
+            } else {
+                secondary.push(detection.clone());
             }
+        }
+        let primary_proposals = primary.len();
+        let mut scored: Vec<(Detection, matcher::LiveMatch)> = Vec::new();
+        for detection in primary {
             let Some(crop) =
-                crop_region(image.as_raw(), image.width(), image.height(), detection)
+                crop_region(image.as_raw(), image.width(), image.height(), &detection)
             else {
                 continue;
             };
             let candidate = matcher::embed(&crop);
             if let Some(hit) = pool.best(&candidate) {
-                if detection.score >= SCORE_THRESHOLD
-                    && best_score.map(|score| hit.score > score).unwrap_or(true)
-                {
+                if best_score.map(|score| hit.score > score).unwrap_or(true) {
                     best_score = Some(hit.score);
                     best_class = Some(hit.name.clone());
                 }
-                scored.push((detection.clone(), hit));
+                scored.push((detection, hit));
+            }
+        }
+
+        if scored
+            .iter()
+            .any(|(_, hit)| hit.score >= hit.threshold)
+        {
+            for detection in secondary {
+                if !scored.iter().any(|(seed, hit)| {
+                    hit.score >= hit.threshold && matcher::encloses(&detection, seed)
+                }) {
+                    continue;
+                }
+                let Some(crop) =
+                    crop_region(image.as_raw(), image.width(), image.height(), &detection)
+                else {
+                    continue;
+                };
+                let candidate = matcher::embed(&crop);
+                if let Some(hit) = pool.best(&candidate) {
+                    scored.push((detection, hit));
+                }
             }
         }
 

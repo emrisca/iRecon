@@ -23,7 +23,7 @@ const PREVIEW_WIDTH: u32 = 640;
 pub(crate) const SCORE_THRESHOLD: f32 = 0.2;
 /// The wider pool read for expansion. Rock and wall proposals sit here, so they
 /// must not become matches unless a primary seed already landed nearby.
-pub(crate) const EXPANSION_SCORE_THRESHOLD: f32 = 0.1;
+pub(crate) const EXPANSION_SCORE_THRESHOLD: f32 = 0.05;
 /// Candidates sit in a band just under their class's own threshold. The band is
 /// a fraction of that threshold rather than a fixed distance, because 0.12 under
 /// 0.9 is a near miss while 0.12 under 0.4 is a different object. The floor and
@@ -49,6 +49,7 @@ pub struct CaptureStats {
     pub fps: f32,
     pub capture_ms: f32,
     pub inference_ms: f32,
+    pub match_ms: f32,
     pub detections: u32,
     /// The closest class to this frame's proposals, matched or not, so the
     /// harvest band can be tuned against what the screen actually scores.
@@ -163,6 +164,7 @@ pub fn capture_start(
                             fps: 0.0,
                             capture_ms: 0.0,
                             inference_ms: 0.0,
+                            match_ms: 0.0,
                             detections: 0,
                             best_score: None,
                             best_class: None,
@@ -183,6 +185,7 @@ pub fn capture_start(
             let mut note: Option<String> = None;
             let mut size = (0u32, 0u32);
             let mut inference_ms = 0f32;
+            let mut match_ms = 0f32;
             let mut detections = 0u32;
             let mut best_score: Option<f32> = None;
             let mut best_class: Option<String> = None;
@@ -269,19 +272,31 @@ pub fn capture_start(
                                 ) {
                                     Ok((boxes, elapsed)) => {
                                         inference_ms = elapsed;
-                                        // Every proposal is cropped from the full frame and
-                                        // scored against the project pool. A class with no
-                                        // examples cannot match, so an empty project draws
-                                        // nothing rather than unlabelled guesses.
+                                        let match_started = Instant::now();
+                                        // Primary proposals are cropped from the full
+                                        // frame and scored against the project pool. Low-
+                                        // confidence proposals wait until a seed matches.
+                                        // A class with no examples cannot match, so an
+                                        // empty project draws nothing.
                                         let mut frame_best: Option<(String, f32)> = None;
-                                        let mut scored: Vec<(Detection, matcher::LiveMatch)> =
-                                            Vec::new();
+                                        let mut primary = Vec::new();
+                                        let mut secondary = Vec::new();
                                         for detection in boxes {
                                             if detection.w * detection.h
                                                 >= matcher::MAX_PROPOSAL_AREA
                                             {
                                                 continue;
                                             }
+                                            if detection.score >= SCORE_THRESHOLD {
+                                                primary.push(detection);
+                                            } else {
+                                                secondary.push(detection);
+                                            }
+                                        }
+
+                                        let mut scored: Vec<(Detection, matcher::LiveMatch)> =
+                                            Vec::new();
+                                        for detection in primary {
                                             let Some(crop) = crop_region(
                                                 image.as_raw(),
                                                 image.width(),
@@ -294,43 +309,69 @@ pub fn capture_start(
                                             let Some(guess) = pool.best(&candidate) else {
                                                 continue;
                                             };
-                                            if detection.score >= SCORE_THRESHOLD {
-                                                if frame_best
-                                                    .as_ref()
-                                                    .map(|(_, score)| guess.score > *score)
-                                                    .unwrap_or(true)
-                                                {
-                                                    frame_best = Some((
-                                                        guess.name.clone(),
-                                                        guess.score,
-                                                    ));
-                                                }
+                                            if frame_best
+                                                .as_ref()
+                                                .map(|(_, score)| guess.score > *score)
+                                                .unwrap_or(true)
+                                            {
+                                                frame_best =
+                                                    Some((guess.name.clone(), guess.score));
+                                            }
 
-                                                // A proposal just under its class's
-                                                // threshold is the one worth asking
-                                                // about, so it is saved for review.
-                                                if guess.score < guess.threshold
-                                                    && harvested < HARVEST_CAP
-                                                    && last_harvest.elapsed() >= HARVEST_INTERVAL
-                                                    && guess.score
-                                                        >= harvest_floor(guess.threshold)
-                                                {
-                                                    if let Some(project) = project {
-                                                        if save_candidate(
-                                                            &app_handle,
-                                                            project,
-                                                            guess.class_id,
-                                                            guess.score,
-                                                            &crop,
-                                                            &mut harvest_root,
-                                                        ) {
-                                                            harvested += 1;
-                                                            last_harvest = Instant::now();
-                                                        }
+                                            // A proposal just under its class's threshold
+                                            // is the one worth asking about, so it is
+                                            // saved for review.
+                                            if guess.score < guess.threshold
+                                                && harvested < HARVEST_CAP
+                                                && last_harvest.elapsed() >= HARVEST_INTERVAL
+                                                && guess.score >= harvest_floor(guess.threshold)
+                                            {
+                                                if let Some(project) = project {
+                                                    if save_candidate(
+                                                        &app_handle,
+                                                        project,
+                                                        guess.class_id,
+                                                        guess.score,
+                                                        &crop,
+                                                        &mut harvest_root,
+                                                    ) {
+                                                        harvested += 1;
+                                                        last_harvest = Instant::now();
                                                     }
                                                 }
                                             }
                                             scored.push((detection, guess));
+                                        }
+
+                                        // Low-confidence proposals are only read when
+                                        // they can contain a seed that already matched.
+                                        // Scoring all of them was several seconds per
+                                        // frame at the 0.05 detector floor.
+                                        if scored
+                                            .iter()
+                                            .any(|(_, hit)| hit.score >= hit.threshold)
+                                        {
+                                            for detection in secondary {
+                                                if !scored.iter().any(|(seed, hit)| {
+                                                    hit.score >= hit.threshold
+                                                        && matcher::encloses(&detection, seed)
+                                                }) {
+                                                    continue;
+                                                }
+                                                let Some(crop) = crop_region(
+                                                    image.as_raw(),
+                                                    image.width(),
+                                                    image.height(),
+                                                    &detection,
+                                                ) else {
+                                                    continue;
+                                                };
+                                                let candidate = matcher::embed(&crop);
+                                                let Some(guess) = pool.best(&candidate) else {
+                                                    continue;
+                                                };
+                                                scored.push((detection, guess));
+                                            }
                                         }
                                         let matched: Vec<Detection> = matcher::refine(
                                             &scored,
@@ -344,6 +385,8 @@ pub fn capture_start(
                                             detection
                                         })
                                         .collect();
+                                        match_ms =
+                                            match_started.elapsed().as_secs_f32() * 1000.0;
                                         if let Some((name, score)) = frame_best {
                                             best_class = Some(name);
                                             best_score = Some(score);
@@ -402,6 +445,7 @@ pub fn capture_start(
                             0.0
                         },
                         inference_ms,
+                        match_ms,
                         detections,
                         best_score,
                         best_class: best_class.clone(),
@@ -436,6 +480,7 @@ pub fn capture_start(
                 fps: 0.0,
                 capture_ms: 0.0,
                 inference_ms,
+                match_ms,
                 detections: 0,
                 best_score,
                 best_class,

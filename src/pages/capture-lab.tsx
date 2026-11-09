@@ -244,13 +244,14 @@ export function CaptureLabPage() {
       </div>
 
       <div className="flex flex-col gap-2.5 p-2.5">
-        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
           {metric(stats ? stats.fps.toFixed(1) : "0.0", "Frames per second")}
           {metric(stats ? `${stats.captureMs.toFixed(1)} ms` : "0 ms", "Capture cost")}
           {metric(
             detections ? `${detections.inferenceMs.toFixed(1)} ms` : "0 ms",
             "Inference cost"
           )}
+          {metric(stats ? `${stats.matchMs.toFixed(1)} ms` : "0 ms", "Matcher cost")}
           {metric(detections ? String(detections.boxes.length) : "0", "Detections")}
         </div>
 

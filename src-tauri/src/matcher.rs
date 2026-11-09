@@ -19,13 +19,17 @@ use crate::detector::Detection;
 
 /// Bumped whenever the fingerprint changes: old rows then re-embed lazily
 /// instead of being compared against a different vector space.
-pub const EMBEDDING_MODEL: &str = "irecon-fingerprint-v3";
+pub const EMBEDDING_MODEL: &str = "irecon-fingerprint-v4";
 
 const CELLS: usize = 8;
 /// Per cell: red ratio, green ratio, luma, edge strength, hue cosine, hue sine.
 const FEATURES: usize = 6;
 const HIST_BINS: usize = 64;
 const HIST_WEIGHT: f32 = 1.0;
+/// The fingerprint is an 8 by 8 cell summary, so a crop does not need every
+/// pixel. Reading a bounded sample keeps a full-frame proposal from costing
+/// milliseconds while still giving each cell a dozen samples per axis.
+const MAX_SAMPLES_PER_AXIS: u32 = 96;
 /// Negatives are a veto, not an equal vote. Subtracting the whole best negative
 /// similarity erased correct matches whenever any background crop scored
 /// highly, so only a quarter of it counts against the best positive.
@@ -50,56 +54,66 @@ const DEDUPE_IOU: f32 = 0.3;
 /// is the important part: a crop and its background share most of that average,
 /// so removing it leaves where this crop differs from its own mean, which is
 /// what actually separates one object from another. Without it every pair of
-/// crops scored around 0.99 and no threshold could tell them apart.
+/// crops scored around 0.99 and no threshold could tell them apart. Pixels are
+/// sampled at no more than 96 per axis; the cell means do not need a full scan.
 pub fn embed(image: &RgbaImage) -> Vec<f32> {
     let width = image.width().max(1);
     let height = image.height().max(1);
+    let step_x = ((width + MAX_SAMPLES_PER_AXIS - 1) / MAX_SAMPLES_PER_AXIS).max(1);
+    let step_y = ((height + MAX_SAMPLES_PER_AXIS - 1) / MAX_SAMPLES_PER_AXIS).max(1);
     let cell_count = CELLS * CELLS;
     let mut sums = vec![[0f32; FEATURES]; cell_count];
     let mut counts = vec![0f32; cell_count];
+    let mut histogram = vec![0f32; HIST_BINS];
 
-    for (x, y, pixel) in image.enumerate_pixels() {
-        let [r, g, b, _] = pixel.0;
-        let (r, g, b) = (r as f32 + 1.0, g as f32 + 1.0, b as f32 + 1.0);
-        let total = r + g + b;
+    for y in (0..height).step_by(step_y as usize) {
+        for x in (0..width).step_by(step_x as usize) {
+            let pixel = image.get_pixel(x, y);
+            let [r, g, b, _] = pixel.0;
+            let (r, g, b) = (r as f32 + 1.0, g as f32 + 1.0, b as f32 + 1.0);
+            let total = r + g + b;
 
-        let cell_x = (x * CELLS as u32 / width).min(CELLS as u32 - 1) as usize;
-        let cell_y = (y * CELLS as u32 / height).min(CELLS as u32 - 1) as usize;
-        let cell = cell_y * CELLS + cell_x;
+            let cell_x = (x * CELLS as u32 / width).min(CELLS as u32 - 1) as usize;
+            let cell_y = (y * CELLS as u32 / height).min(CELLS as u32 - 1) as usize;
+            let cell = cell_y * CELLS + cell_x;
 
-        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        let right = image.get_pixel((x + 1).min(width - 1), y).0;
-        let down = image.get_pixel(x, (y + 1).min(height - 1)).0;
-        let right_luma = 0.2126 * right[0] as f32
-            + 0.7152 * right[1] as f32
-            + 0.0722 * right[2] as f32;
-        let down_luma = 0.2126 * down[0] as f32
-            + 0.7152 * down[1] as f32
-            + 0.0722 * down[2] as f32;
-        let edge = ((right_luma - luma).abs() + (down_luma - luma).abs()) / 2.0;
+            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let right = image.get_pixel((x + 1).min(width - 1), y).0;
+            let down = image.get_pixel(x, (y + 1).min(height - 1)).0;
+            let right_luma =
+                0.2126 * right[0] as f32 + 0.7152 * right[1] as f32 + 0.0722 * right[2] as f32;
+            let down_luma =
+                0.2126 * down[0] as f32 + 0.7152 * down[1] as f32 + 0.0722 * down[2] as f32;
+            let edge = ((right_luma - luma).abs() + (down_luma - luma).abs()) / 2.0;
 
-        let high = r.max(g).max(b);
-        let low = r.min(g).min(b);
-        let chroma = high - low;
-        let saturation = chroma / high.max(1.0);
-        let hue = if chroma <= 1.0 {
-            0.0
-        } else if high == r {
-            ((g - b) / chroma).rem_euclid(6.0)
-        } else if high == g {
-            (b - r) / chroma + 2.0
-        } else {
-            (r - g) / chroma + 4.0
-        };
-        let angle = hue / 6.0 * std::f32::consts::TAU;
+            let high = r.max(g).max(b);
+            let low = r.min(g).min(b);
+            let chroma = high - low;
+            let saturation = chroma / high.max(1.0);
+            let hue = if chroma <= 1.0 {
+                0.0
+            } else if high == r {
+                ((g - b) / chroma).rem_euclid(6.0)
+            } else if high == g {
+                (b - r) / chroma + 2.0
+            } else {
+                (r - g) / chroma + 4.0
+            };
+            let angle = hue / 6.0 * std::f32::consts::TAU;
 
-        sums[cell][0] += r / total;
-        sums[cell][1] += g / total;
-        sums[cell][2] += luma / 255.0;
-        sums[cell][3] += edge / 255.0;
-        sums[cell][4] += angle.cos() * saturation;
-        sums[cell][5] += angle.sin() * saturation;
-        counts[cell] += 1.0;
+            sums[cell][0] += r / total;
+            sums[cell][1] += g / total;
+            sums[cell][2] += luma / 255.0;
+            sums[cell][3] += edge / 255.0;
+            sums[cell][4] += angle.cos() * saturation;
+            sums[cell][5] += angle.sin() * saturation;
+            counts[cell] += 1.0;
+
+            let bin = (pixel.0[0] as usize / 64).min(3) * 16
+                + (pixel.0[1] as usize / 64).min(3) * 4
+                + (pixel.0[2] as usize / 64).min(3);
+            histogram[bin] += 1.0;
+        }
     }
 
     let mut values = vec![0f32; cell_count * FEATURES];
@@ -126,14 +140,6 @@ pub fn embed(image: &RgbaImage) -> Vec<f32> {
     // structural features their contrast, but it also throws away the strongest
     // signal for a white-and-red robot against a black-and-pink weapon. Put
     // colour back as a coarse global histogram and weight it against structure.
-    let mut histogram = vec![0f32; HIST_BINS];
-    for pixel in image.pixels() {
-        let [r, g, b, _] = pixel.0;
-        let bin = (r as usize / 64).min(3) * 16
-            + (g as usize / 64).min(3) * 4
-            + (b as usize / 64).min(3);
-        histogram[bin] += 1.0;
-    }
     normalize(&mut histogram);
     for value in histogram {
         centred.push(value * HIST_WEIGHT);
@@ -222,7 +228,7 @@ fn area(detection: &Detection) -> f32 {
     detection.w * detection.h
 }
 
-fn centre_inside(outer: &Detection, inner: &Detection) -> bool {
+pub fn encloses(outer: &Detection, inner: &Detection) -> bool {
     let x = inner.x + inner.w / 2.0;
     let y = inner.y + inner.h / 2.0;
     x >= outer.x && x <= outer.x + outer.w && y >= outer.y && y <= outer.y + outer.h
@@ -280,7 +286,7 @@ pub fn refine(
                     || candidate_area > EXPANSION_MAX_AREA
                     || candidate.w < seed.w * 1.1
                     || candidate.h < seed.h * 1.1
-                    || !centre_inside(candidate, seed)
+                    || !encloses(candidate, seed)
                 {
                     continue;
                 }

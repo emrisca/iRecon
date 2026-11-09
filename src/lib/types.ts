@@ -14,6 +14,7 @@ export type CaptureStats = {
   fps: number;
   captureMs: number;
   inferenceMs: number;
+  matchMs: number;
   detections: number;
   poolClasses: number;
   poolExamples: number;
