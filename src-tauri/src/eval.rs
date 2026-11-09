@@ -9,7 +9,7 @@ use rusqlite::params;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-use crate::capture::{crop_region, MAX_PROPOSAL_AREA};
+use crate::capture::{crop_region, EXPANSION_SCORE_THRESHOLD, SCORE_THRESHOLD};
 use crate::detector::Detection;
 use crate::matcher;
 use crate::AppState;
@@ -190,7 +190,7 @@ pub fn evaluate_frames(
             image.as_raw(),
             image.width(),
             image.height(),
-            crate::capture::SCORE_THRESHOLD,
+            EXPANSION_SCORE_THRESHOLD,
         )?;
 
         let mut matches = 0usize;
@@ -198,9 +198,14 @@ pub fn evaluate_frames(
         let mut matched_class_ids: HashSet<i64> = HashSet::new();
         let mut best_score: Option<f32> = None;
         let mut best_class: Option<String> = None;
+        let mut scored: Vec<(Detection, matcher::LiveMatch)> = Vec::new();
+        let mut primary_proposals = 0usize;
         for detection in &boxes {
-            if detection.w * detection.h >= MAX_PROPOSAL_AREA {
+            if detection.w * detection.h >= matcher::MAX_PROPOSAL_AREA {
                 continue;
+            }
+            if detection.score >= SCORE_THRESHOLD {
+                primary_proposals += 1;
             }
             let Some(crop) =
                 crop_region(image.as_raw(), image.width(), image.height(), detection)
@@ -209,32 +214,38 @@ pub fn evaluate_frames(
             };
             let candidate = matcher::embed(&crop);
             if let Some(hit) = pool.best(&candidate) {
-                if best_score.map(|score| hit.score > score).unwrap_or(true) {
+                if detection.score >= SCORE_THRESHOLD
+                    && best_score.map(|score| hit.score > score).unwrap_or(true)
+                {
                     best_score = Some(hit.score);
                     best_class = Some(hit.name.clone());
                 }
-                if hit.score >= hit.threshold {
-                    matches += 1;
-                    matched_class_ids.insert(hit.class_id);
-                    matched_boxes.push(Detection {
-                        label: hit.name,
-                        score: hit.score,
-                        ..detection.clone()
-                    });
-                }
+                scored.push((detection.clone(), hit));
             }
+        }
+
+        for (mut detection, hit) in matcher::refine(
+            &scored,
+            SCORE_THRESHOLD,
+            EXPANSION_SCORE_THRESHOLD,
+        ) {
+            matches += 1;
+            matched_class_ids.insert(hit.class_id);
+            detection.label = hit.name;
+            detection.score = hit.score;
+            matched_boxes.push(detection);
         }
 
         if matches > 0 {
             frames_with_match += 1;
         }
-        total_proposals += boxes.len();
+        total_proposals += primary_proposals;
         total_matches += matches;
         frames.push(EvalFrame {
             frame_id,
             width: image.width(),
             height: image.height(),
-            proposals: boxes.len(),
+            proposals: primary_proposals,
             matches,
             best_score,
             best_class,

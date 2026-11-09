@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use image::RgbaImage;
 use serde::Serialize;
 
+use crate::detector::Detection;
+
 /// Bumped whenever the fingerprint changes: old rows then re-embed lazily
 /// instead of being compared against a different vector space.
 pub const EMBEDDING_MODEL: &str = "irecon-fingerprint-v3";
@@ -30,6 +32,16 @@ const HIST_WEIGHT: f32 = 1.0;
 const NEGATIVE_WEIGHT: f32 = 0.25;
 
 pub const EMBEDDING_DIM: usize = CELLS * CELLS * FEATURES + HIST_BINS;
+
+/// A proposal covering more than a quarter of the frame is scene-wide noise
+/// (the detector sometimes calls the whole picture a train), not an object.
+pub const MAX_PROPOSAL_AREA: f32 = 0.25;
+/// A larger box is only allowed to replace a small seed when its own matcher
+/// score is this close to the seed's. It is not a second, lower threshold: the
+/// seed still has to clear the class threshold on its own.
+const EXPANSION_SCORE_MARGIN: f32 = 0.05;
+const EXPANSION_MAX_AREA: f32 = 0.08;
+const DEDUPE_IOU: f32 = 0.3;
 
 /// One example reduced to a unit vector.
 ///
@@ -204,6 +216,110 @@ pub struct LiveMatch {
     pub name: String,
     pub score: f32,
     pub threshold: f32,
+}
+
+fn area(detection: &Detection) -> f32 {
+    detection.w * detection.h
+}
+
+fn centre_inside(outer: &Detection, inner: &Detection) -> bool {
+    let x = inner.x + inner.w / 2.0;
+    let y = inner.y + inner.h / 2.0;
+    x >= outer.x && x <= outer.x + outer.w && y >= outer.y && y <= outer.y + outer.h
+}
+
+fn overlap(left: &Detection, right: &Detection) -> f32 {
+    let x0 = left.x.max(right.x);
+    let y0 = left.y.max(right.y);
+    let x1 = (left.x + left.w).min(right.x + right.w);
+    let y1 = (left.y + left.h).min(right.y + right.h);
+    let intersection = (x1 - x0).max(0.0) * (y1 - y0).max(0.0);
+    let union = area(left) + area(right) - intersection;
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+/// Turns per-proposal scores into the boxes to draw.
+///
+/// A proposal only seeds a match when it clears both the detector's primary
+/// floor and the class threshold. A tiny seed (a head or torso slice) is then
+/// allowed to grow to a larger, close-scoring proposal that encloses it. This
+/// keeps the rock and wall proposals that appear below the primary detector
+/// floor from becoming matches on their own, while still giving a detected bot
+/// its full body when one was proposed.
+///
+/// Seeds that land on the same object are deduplicated by overlap.
+pub fn refine(
+    scored: &[(Detection, LiveMatch)],
+    primary_detector: f32,
+    expansion_detector: f32,
+) -> Vec<(Detection, LiveMatch)> {
+    let mut refined: Vec<(Detection, LiveMatch)> = Vec::new();
+    for (seed, hit) in scored {
+        if seed.score < primary_detector || hit.score < hit.threshold {
+            continue;
+        }
+
+        let seed_area = area(seed);
+        let mut chosen = seed.clone();
+        let mut chosen_area = seed_area;
+        if seed_area < 0.02 {
+            for (candidate, candidate_hit) in scored {
+                if candidate_hit.class_id != hit.class_id
+                    || candidate.score < expansion_detector
+                    || candidate_hit.score + EXPANSION_SCORE_MARGIN < hit.score
+                {
+                    continue;
+                }
+                let candidate_area = area(candidate);
+                if candidate_area < seed_area * 1.5
+                    || candidate_area > seed_area * 40.0
+                    || candidate_area > EXPANSION_MAX_AREA
+                    || candidate.w < seed.w * 1.1
+                    || candidate.h < seed.h * 1.1
+                    || !centre_inside(candidate, seed)
+                {
+                    continue;
+                }
+                if candidate_area > chosen_area {
+                    chosen = candidate.clone();
+                    chosen_area = candidate_area;
+                }
+            }
+        }
+
+        refined.push((
+            Detection {
+                label: hit.name.clone(),
+                score: hit.score,
+                x: chosen.x,
+                y: chosen.y,
+                w: chosen.w,
+                h: chosen.h,
+            },
+            hit.clone(),
+        ));
+    }
+
+    let mut deduped: Vec<(Detection, LiveMatch)> = Vec::new();
+    for (detection, hit) in refined {
+        let found = deduped.iter_mut().find(|(existing, existing_hit)| {
+            existing_hit.class_id == hit.class_id && overlap(existing, &detection) > DEDUPE_IOU
+        });
+        match found {
+            Some((existing, existing_hit)) => {
+                if area(&detection) > area(existing) {
+                    *existing = detection;
+                    *existing_hit = hit;
+                }
+            }
+            None => deduped.push((detection, hit)),
+        }
+    }
+    deduped
 }
 
 impl Pool {
@@ -566,6 +682,55 @@ mod tests {
     fn an_empty_pool_matches_nothing() {
         let candidate = embed(&patterned());
         assert!(Pool::default().classify(&candidate).is_none());
+    }
+
+    #[test]
+    fn a_small_match_grows_to_an_enclosing_body_proposal() {
+        let hit = |score: f32| LiveMatch {
+            class_id: 1,
+            name: "robot".into(),
+            score,
+            threshold: 0.45,
+        };
+        let seed = Detection {
+            label: "robot".into(),
+            score: 0.5,
+            x: 0.50,
+            y: 0.40,
+            w: 0.02,
+            h: 0.03,
+        };
+        let body = Detection {
+            label: "robot".into(),
+            score: 0.3,
+            x: 0.47,
+            y: 0.35,
+            w: 0.09,
+            h: 0.15,
+        };
+        let refined = refine(&[(seed, hit(0.50)), (body, hit(0.47))], 0.2, 0.1);
+        assert_eq!(refined.len(), 1);
+        assert!((refined[0].0.w - 0.09).abs() < 1e-6);
+        assert!((refined[0].0.h - 0.15).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_low_confidence_proposal_cannot_seed_a_match() {
+        let rock = Detection {
+            label: "robot".into(),
+            score: 0.1,
+            x: 0.2,
+            y: 0.2,
+            w: 0.2,
+            h: 0.2,
+        };
+        let hit = LiveMatch {
+            class_id: 1,
+            name: "robot".into(),
+            score: 0.9,
+            threshold: 0.45,
+        };
+        assert!(refine(&[(rock, hit)], 0.2, 0.1).is_empty());
     }
 
     #[test]

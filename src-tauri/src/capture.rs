@@ -18,10 +18,12 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const REPORT_INTERVAL: Duration = Duration::from_millis(500);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(800);
 const PREVIEW_WIDTH: u32 = 640;
-/// The detector's own floor. It sits low on purpose: the matcher decides what
-/// the proposals mean, so a game scene that is not in the detector's vocabulary
-/// still reaches the pool instead of being dropped before it is scored.
+/// The detector's primary floor. A proposal below this never seeds a match on
+/// its own; it can only support a seed it encloses.
 pub(crate) const SCORE_THRESHOLD: f32 = 0.2;
+/// The wider pool read for expansion. Rock and wall proposals sit here, so they
+/// must not become matches unless a primary seed already landed nearby.
+pub(crate) const EXPANSION_SCORE_THRESHOLD: f32 = 0.1;
 /// Candidates sit in a band just under their class's own threshold. The band is
 /// a fraction of that threshold rather than a fixed distance, because 0.12 under
 /// 0.9 is a near miss while 0.12 under 0.4 is a different object. The floor and
@@ -29,10 +31,6 @@ pub(crate) const SCORE_THRESHOLD: f32 = 0.2;
 const HARVEST_BAND_FRACTION: f32 = 0.1;
 const HARVEST_BAND_MIN: f32 = 0.04;
 const HARVEST_BAND_MAX: f32 = 0.12;
-
-/// A proposal covering more than a quarter of the frame is scene-wide noise
-/// (the detector sometimes calls the whole picture a train), not an object.
-pub const MAX_PROPOSAL_AREA: f32 = 0.25;
 
 fn harvest_floor(threshold: f32) -> f32 {
     threshold - (threshold * HARVEST_BAND_FRACTION).clamp(HARVEST_BAND_MIN, HARVEST_BAND_MAX)
@@ -267,7 +265,7 @@ pub fn capture_start(
                                     image.as_raw(),
                                     image.width(),
                                     image.height(),
-                                    SCORE_THRESHOLD,
+                                    EXPANSION_SCORE_THRESHOLD,
                                 ) {
                                     Ok((boxes, elapsed)) => {
                                         inference_ms = elapsed;
@@ -276,42 +274,43 @@ pub fn capture_start(
                                         // examples cannot match, so an empty project draws
                                         // nothing rather than unlabelled guesses.
                                         let mut frame_best: Option<(String, f32)> = None;
-                                        let matched: Vec<Detection> = boxes
-                                            .into_iter()
-                                            .filter_map(|detection| {
-                                                if detection.w * detection.h
-                                                    >= MAX_PROPOSAL_AREA
-                                                {
-                                                    return None;
-                                                }
-                                                let crop = crop_region(
-                                                    image.as_raw(),
-                                                    image.width(),
-                                                    image.height(),
-                                                    &detection,
-                                                )?;
-                                                let candidate = matcher::embed(&crop);
-                                                let guess = pool.best(&candidate)?;
+                                        let mut scored: Vec<(Detection, matcher::LiveMatch)> =
+                                            Vec::new();
+                                        for detection in boxes {
+                                            if detection.w * detection.h
+                                                >= matcher::MAX_PROPOSAL_AREA
+                                            {
+                                                continue;
+                                            }
+                                            let Some(crop) = crop_region(
+                                                image.as_raw(),
+                                                image.width(),
+                                                image.height(),
+                                                &detection,
+                                            ) else {
+                                                continue;
+                                            };
+                                            let candidate = matcher::embed(&crop);
+                                            let Some(guess) = pool.best(&candidate) else {
+                                                continue;
+                                            };
+                                            if detection.score >= SCORE_THRESHOLD {
                                                 if frame_best
                                                     .as_ref()
                                                     .map(|(_, score)| guess.score > *score)
                                                     .unwrap_or(true)
                                                 {
-                                                    frame_best =
-                                                        Some((guess.name.clone(), guess.score));
-                                                }
-                                                if guess.score >= guess.threshold {
-                                                    return Some(Detection {
-                                                        label: guess.name,
-                                                        score: guess.score,
-                                                        ..detection
-                                                    });
+                                                    frame_best = Some((
+                                                        guess.name.clone(),
+                                                        guess.score,
+                                                    ));
                                                 }
 
                                                 // A proposal just under its class's
                                                 // threshold is the one worth asking
                                                 // about, so it is saved for review.
-                                                if harvested < HARVEST_CAP
+                                                if guess.score < guess.threshold
+                                                    && harvested < HARVEST_CAP
                                                     && last_harvest.elapsed() >= HARVEST_INTERVAL
                                                     && guess.score
                                                         >= harvest_floor(guess.threshold)
@@ -330,9 +329,21 @@ pub fn capture_start(
                                                         }
                                                     }
                                                 }
-                                                None
-                                            })
-                                            .collect();
+                                            }
+                                            scored.push((detection, guess));
+                                        }
+                                        let matched: Vec<Detection> = matcher::refine(
+                                            &scored,
+                                            SCORE_THRESHOLD,
+                                            EXPANSION_SCORE_THRESHOLD,
+                                        )
+                                        .into_iter()
+                                        .map(|(mut detection, guess)| {
+                                            detection.label = guess.name;
+                                            detection.score = guess.score;
+                                            detection
+                                        })
+                                        .collect();
                                         if let Some((name, score)) = frame_best {
                                             best_class = Some(name);
                                             best_score = Some(score);
