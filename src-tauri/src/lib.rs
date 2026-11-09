@@ -94,6 +94,8 @@ pub fn run() {
             review::candidate_nearest,
             review::candidate_resolve,
             eval::evaluate_frames,
+            eval::frame_truth_list,
+            eval::frame_truth_set,
             dataset::dataset_export,
             agent::agent_snapshot,
             agent::agent_act,

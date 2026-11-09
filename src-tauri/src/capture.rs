@@ -30,6 +30,10 @@ const HARVEST_BAND_FRACTION: f32 = 0.1;
 const HARVEST_BAND_MIN: f32 = 0.04;
 const HARVEST_BAND_MAX: f32 = 0.12;
 
+/// A proposal covering more than a quarter of the frame is scene-wide noise
+/// (the detector sometimes calls the whole picture a train), not an object.
+pub const MAX_PROPOSAL_AREA: f32 = 0.25;
+
 fn harvest_floor(threshold: f32) -> f32 {
     threshold - (threshold * HARVEST_BAND_FRACTION).clamp(HARVEST_BAND_MIN, HARVEST_BAND_MAX)
 }
@@ -275,6 +279,11 @@ pub fn capture_start(
                                         let matched: Vec<Detection> = boxes
                                             .into_iter()
                                             .filter_map(|detection| {
+                                                if detection.w * detection.h
+                                                    >= MAX_PROPOSAL_AREA
+                                                {
+                                                    return None;
+                                                }
                                                 let crop = crop_region(
                                                     image.as_raw(),
                                                     image.width(),

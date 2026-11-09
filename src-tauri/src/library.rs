@@ -4,7 +4,7 @@
 //! not care which way a frame arrived. Imports are copied into the project's
 //! `frames/` folder, which keeps a project a folder a user can move or delete.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusqlite::params;
 use serde::Serialize;
@@ -22,16 +22,31 @@ pub struct ImportReport {
     pub errors: Vec<String>,
 }
 
+/// Thumbnails live beside the frames. Without them every library or evaluation
+/// page decodes each full-size PNG again, which takes over a second per frame.
 fn frame_row_to_view(
     id: i64,
     path: String,
     width: u32,
     height: u32,
     created_at: String,
+    thumbs: &Path,
 ) -> FrameView {
-    let preview = image::open(&path)
-        .map(|image| label::preview(&image.to_rgba8()))
-        .unwrap_or_default();
+    let thumb = thumbs.join(format!("{id}.jpg"));
+    let preview = if let Ok(bytes) = std::fs::read(&thumb) {
+        label::jpeg_data_url(&bytes)
+    } else {
+        match image::open(&path) {
+            Ok(image) => {
+                let bytes = label::jpeg_bytes(&image.to_rgba8(), 1280, 70);
+                if !bytes.is_empty() {
+                    let _ = std::fs::write(&thumb, &bytes);
+                }
+                label::jpeg_data_url(&bytes)
+            }
+            Err(_) => String::new(),
+        }
+    };
     FrameView {
         id,
         path,
@@ -71,10 +86,13 @@ pub fn library_list(app: AppHandle, project_id: i64) -> Result<Vec<FrameView>, S
         frames
     };
 
+    let (_slug, root) = label::project_folder(&app, project_id)?;
+    let thumbs = root.join("thumbs");
+    std::fs::create_dir_all(&thumbs).map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
         .map(|(id, path, width, height, created_at)| {
-            frame_row_to_view(id, path, width, height, created_at)
+            frame_row_to_view(id, path, width, height, created_at, &thumbs)
         })
         .collect())
 }
@@ -83,9 +101,10 @@ pub fn library_list(app: AppHandle, project_id: i64) -> Result<Vec<FrameView>, S
 pub fn library_frame(app: AppHandle, frame_id: i64) -> Result<FrameView, String> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let (id, path, width, height, created_at) = conn
+    let (id, path, width, height, created_at, project_id) = conn
         .query_row(
-            "select id, path, width, height, created_at from frame where id = ?1",
+            "select id, path, width, height, created_at, project_id
+             from frame where id = ?1",
             params![frame_id],
             |row| {
                 Ok((
@@ -94,12 +113,23 @@ pub fn library_frame(app: AppHandle, frame_id: i64) -> Result<FrameView, String>
                     row.get::<_, u32>(2)?,
                     row.get::<_, u32>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )
         .map_err(|_| "That frame is gone".to_string())?;
     drop(conn);
-    Ok(frame_row_to_view(id, path, width, height, created_at))
+    let (_slug, root) = label::project_folder(&app, project_id)?;
+    let thumbs = root.join("thumbs");
+    std::fs::create_dir_all(&thumbs).map_err(|e| e.to_string())?;
+    Ok(frame_row_to_view(
+        id,
+        path,
+        width,
+        height,
+        created_at,
+        &thumbs,
+    ))
 }
 
 fn import_paths(

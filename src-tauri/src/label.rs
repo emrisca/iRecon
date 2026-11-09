@@ -13,6 +13,7 @@ use crate::matcher;
 use crate::AppState;
 
 const PREVIEW_WIDTH: u32 = 1280;
+const PREVIEW_QUALITY: u8 = 70;
 const PALETTE: [&str; 8] = [
     "oklch(0.62 0.11 250)",
     "oklch(0.62 0.11 160)",
@@ -78,20 +79,51 @@ pub(crate) fn png_data_url(image: &RgbaImage) -> String {
     )
 }
 
-pub(crate) fn preview(image: &RgbaImage) -> String {
-    let width = image.width();
-    if width <= PREVIEW_WIDTH {
-        return png_data_url(image);
+pub(crate) fn jpeg_data_url(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
     }
-    let scale = PREVIEW_WIDTH as f32 / width as f32;
-    let height = ((image.height() as f32 * scale).round() as u32).max(1);
-    let small = image::imageops::resize(
-        image,
-        PREVIEW_WIDTH,
-        height,
-        image::imageops::FilterType::Triangle,
-    );
-    png_data_url(&small)
+    format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+/// Downsamples to `target_width` and encodes JPEG bytes. Preview payloads are
+/// JPEG, not PNG: a 1280-wide PNG of a game frame is over a megabyte of base64
+/// each. The bytes are also what the library caches as a thumbnail, so opening
+/// a project does not decode every full-size frame again.
+pub(crate) fn jpeg_bytes(image: &RgbaImage, target_width: u32, quality: u8) -> Vec<u8> {
+    let width = image.width();
+    let height = ((image.height() as f32 * target_width as f32 / width.max(1) as f32)
+        .round() as u32)
+        .max(1);
+    let small = if width <= target_width {
+        image.clone()
+    } else {
+        image::imageops::resize(
+            image,
+            target_width,
+            height,
+            image::imageops::FilterType::Triangle,
+        )
+    };
+
+    let rgb = image::RgbImage::from_fn(small.width(), small.height(), |x, y| {
+        let [r, g, b, _] = small.get_pixel(x, y).0;
+        image::Rgb([r, g, b])
+    });
+    let mut buffer = Vec::new();
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, quality);
+    if encoder.encode_image(&rgb).is_err() {
+        return Vec::new();
+    }
+    buffer
+}
+
+pub(crate) fn preview(image: &RgbaImage) -> String {
+    jpeg_data_url(&jpeg_bytes(image, PREVIEW_WIDTH, PREVIEW_QUALITY))
 }
 
 pub(crate) fn project_folder(
@@ -257,7 +289,7 @@ pub fn class_create(app: AppHandle, project_id: i64, name: String) -> Result<Cla
     let color = PALETTE[(count as usize) % PALETTE.len()].to_string();
 
     conn.execute(
-        "insert into class (project_id, name, color, threshold) values (?1, ?2, ?3, 0.85)",
+        "insert into class (project_id, name, color, threshold) values (?1, ?2, ?3, 0.45)",
         params![project_id, name, color],
     )
     .map_err(|e| e.to_string())?;
@@ -267,7 +299,7 @@ pub fn class_create(app: AppHandle, project_id: i64, name: String) -> Result<Cla
         id,
         name,
         color,
-        threshold: 0.85,
+        threshold: 0.45,
         examples: 0,
     })
 }

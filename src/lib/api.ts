@@ -9,7 +9,9 @@ import type {
   ClassMatch,
   DatasetExport,
   DetectionPayload,
+  EvalReport,
   ExampleView,
+  FrameTruth,
   FramePayload,
   FrameView,
   ImportReport,
@@ -701,4 +703,65 @@ export async function previewSource(id: number): Promise<FramePayload> {
     return { data: frame.preview, width: frame.width, height: frame.height };
   }
   return invoke<FramePayload>("source_preview", { id });
+}
+
+const demoTruth = new Map<number, Set<number>>();
+
+export async function listFrameTruth(projectId: number): Promise<FrameTruth[]> {
+  if (!isDesktop) {
+    return [...demoTruth].map(([frameId, classIds]) => ({
+      frameId,
+      classIds: [...classIds],
+    }));
+  }
+  return invoke<FrameTruth[]>("frame_truth_list", { projectId });
+}
+
+export async function setFrameTruth(
+  frameId: number,
+  classId: number,
+  present: boolean
+): Promise<void> {
+  if (!isDesktop) {
+    const ids = demoTruth.get(frameId) ?? new Set<number>();
+    if (present) ids.add(classId);
+    else ids.delete(classId);
+    demoTruth.set(frameId, ids);
+    return;
+  }
+  await invoke("frame_truth_set", { frameId, classId, present });
+}
+
+export async function evaluateFrames(
+  projectId: number,
+  frameIds: number[]
+): Promise<EvalReport> {
+  if (!isDesktop) {
+    const classes = demoClasses.get(projectId) ?? [];
+    return {
+      frames: frameIds.map((frameId) => ({
+        frameId,
+        width: 0,
+        height: 0,
+        proposals: 0,
+        matches: 0,
+        bestScore: null,
+        bestClass: null,
+        matchedBoxes: [],
+        matchedClassIds: [],
+      })),
+      classRecall: classes.map((entry) => ({
+        classId: entry.id,
+        name: entry.name,
+        color: entry.color,
+        marked: 0,
+        hits: 0,
+        falsePositives: 0,
+      })),
+      framesWithMatch: 0,
+      proposals: 0,
+      matches: 0,
+    };
+  }
+  return invoke<EvalReport>("evaluate_frames", { projectId, frameIds });
 }

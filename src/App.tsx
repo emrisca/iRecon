@@ -10,6 +10,7 @@ import {
 } from "./lib/api";
 import { useTheme } from "./hooks/use-theme";
 import { CaptureLabPage } from "./pages/capture-lab";
+import { EvalPage } from "./pages/eval";
 import { LabelPage } from "./pages/label";
 import { LibraryPage } from "./pages/library";
 import { ProjectsPage } from "./pages/projects";
@@ -72,6 +73,7 @@ export default function App() {
           {section === "review" ? <ReviewPage /> : null}
           {section === "label" ? <LabelPage /> : null}
           {section === "capture" ? <CaptureLabPage /> : null}
+          {section === "eval" ? <EvalPage /> : null}
         </div>
       </main>
     </div>

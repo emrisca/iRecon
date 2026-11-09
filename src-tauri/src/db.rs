@@ -62,7 +62,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             project_id integer not null references project(id) on delete cascade,
             name text not null,
             color text not null,
-            threshold real not null default 0.85,
+            threshold real not null default 0.45,
             unique (project_id, name)
         );
 
@@ -97,6 +97,12 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             created_at text not null
         );
 
+        create table if not exists frame_truth (
+            frame_id integer not null references frame(id) on delete cascade,
+            class_id integer not null references class(id) on delete cascade,
+            primary key (frame_id, class_id)
+        );
+
         create index if not exists frame_project on frame(project_id);
         create index if not exists source_project on source(project_id);
         create index if not exists candidate_pending on candidate(project_id, state);
@@ -113,8 +119,12 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
 
     // Classes created before thresholds were measured still carry the old
     // 0.55 default, which accepted every unknown crop in the benchmark. Lift
-    // only that exact value, so a threshold chosen on purpose survives.
-    conn.execute_batch("update class set threshold = 0.85 where threshold = 0.55;")?;
+    // that value, then move the 0.85 default to the 0.45 measured for the v3
+    // fingerprint; v3 scores sit lower because the negative penalty is smaller.
+    conn.execute_batch(
+        "update class set threshold = 0.85 where threshold = 0.55;
+         update class set threshold = 0.45 where threshold = 0.85;",
+    )?;
     Ok(conn)
 }
 

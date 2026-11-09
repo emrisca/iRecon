@@ -1,9 +1,10 @@
 //! Project-local matching.
 //!
 //! An example is reduced to a small, deterministic fingerprint: colour and
-//! structure summarised on a fixed grid, centred and normalised to unit length.
-//! Stored as little-endian `f32` it compares with a dot product, so a pool of a
-//! few thousand examples scores in well under a millisecond.
+//! structure summarised on a fixed grid, centred, plus a global colour
+//! histogram, and normalised to unit length. Stored as little-endian `f32` it
+//! compares with a dot product, so a pool of a few thousand examples scores in
+//! well under a millisecond.
 //!
 //! The fingerprint is deliberately not an ONNX encoder yet. It is a baseline
 //! that works with no second model download, and the storage format (a blob and
@@ -16,12 +17,19 @@ use serde::Serialize;
 
 /// Bumped whenever the fingerprint changes: old rows then re-embed lazily
 /// instead of being compared against a different vector space.
-pub const EMBEDDING_MODEL: &str = "irecon-fingerprint-v2";
-pub const EMBEDDING_DIM: usize = 96;
+pub const EMBEDDING_MODEL: &str = "irecon-fingerprint-v3";
 
-const CELLS: usize = 4;
+const CELLS: usize = 8;
 /// Per cell: red ratio, green ratio, luma, edge strength, hue cosine, hue sine.
 const FEATURES: usize = 6;
+const HIST_BINS: usize = 64;
+const HIST_WEIGHT: f32 = 1.0;
+/// Negatives are a veto, not an equal vote. Subtracting the whole best negative
+/// similarity erased correct matches whenever any background crop scored
+/// highly, so only a quarter of it counts against the best positive.
+const NEGATIVE_WEIGHT: f32 = 0.25;
+
+pub const EMBEDDING_DIM: usize = CELLS * CELLS * FEATURES + HIST_BINS;
 
 /// One example reduced to a unit vector.
 ///
@@ -102,12 +110,23 @@ pub fn embed(image: &RgbaImage) -> Vec<f32> {
     }
     normalize(&mut centred);
 
-    // A flat crop has nothing to compare after centring, so fall back to its
-    // absolute colour instead of returning a zero vector that matches nothing.
-    if centred.iter().all(|value| value.abs() < 1e-6) {
-        normalize(&mut values);
-        return values;
+    // Mean-centring removes each crop's average colour, which is what gives the
+    // structural features their contrast, but it also throws away the strongest
+    // signal for a white-and-red robot against a black-and-pink weapon. Put
+    // colour back as a coarse global histogram and weight it against structure.
+    let mut histogram = vec![0f32; HIST_BINS];
+    for pixel in image.pixels() {
+        let [r, g, b, _] = pixel.0;
+        let bin = (r as usize / 64).min(3) * 16
+            + (g as usize / 64).min(3) * 4
+            + (b as usize / 64).min(3);
+        histogram[bin] += 1.0;
     }
+    normalize(&mut histogram);
+    for value in histogram {
+        centred.push(value * HIST_WEIGHT);
+    }
+    normalize(&mut centred);
     centred
 }
 
@@ -175,7 +194,7 @@ impl ClassPool {
         for embedding in &self.negatives {
             negative = negative.max(cosine(candidate, embedding).max(0.0));
         }
-        (positive - negative).clamp(0.0, 1.0)
+        (positive - NEGATIVE_WEIGHT * negative).clamp(0.0, 1.0)
     }
 }
 
@@ -316,8 +335,8 @@ pub struct PoolEntry {
 pub struct ClassMatch {
     pub class_id: i64,
     pub name: String,
-    /// Best positive minus the best negative, clamped to zero. With no
-    /// negatives this is simply the best similarity.
+    /// Best positive minus a quarter of the best negative, clamped to zero.
+    /// With no negatives this is simply the best similarity.
     pub score: f32,
     pub similarity: f32,
     pub margin: f32,
@@ -369,7 +388,7 @@ pub fn rank(
             } else {
                 0.0
             };
-            let margin = tally.best_positive - negative;
+            let margin = tally.best_positive - NEGATIVE_WEIGHT * negative;
             ClassMatch {
                 class_id,
                 name: names
@@ -496,7 +515,12 @@ mod tests {
         names.insert(7, "crate".to_string());
         let ranked = rank(&candidate, &entries, &names);
         assert_eq!(ranked[0].negatives, 1);
-        assert!(ranked[0].score < 0.01, "score was {}", ranked[0].score);
+        // A perfect negative subtracts its 0.25 weight, not the whole score.
+        assert!(
+            ranked[0].score > 0.5 && ranked[0].score < 0.8,
+            "score was {}",
+            ranked[0].score
+        );
     }
 
     #[test]

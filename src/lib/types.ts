@@ -122,6 +122,40 @@ export type ClassMatch = {
   negatives: number;
 };
 
+export type FrameTruth = {
+  frameId: number;
+  classIds: number[];
+};
+
+export type EvalFrame = {
+  frameId: number;
+  width: number;
+  height: number;
+  proposals: number;
+  matches: number;
+  bestScore: number | null;
+  bestClass: string | null;
+  matchedBoxes: Detection[];
+  matchedClassIds: number[];
+};
+
+export type ClassRecall = {
+  classId: number;
+  name: string;
+  color: string;
+  marked: number;
+  hits: number;
+  falsePositives: number;
+};
+
+export type EvalReport = {
+  frames: EvalFrame[];
+  classRecall: ClassRecall[];
+  framesWithMatch: number;
+  proposals: number;
+  matches: number;
+};
+
 export type DatasetExport = {
   path: string;
   frames: number;

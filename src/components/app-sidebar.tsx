@@ -2,6 +2,7 @@ import {
   Crosshair,
   Eye,
   FolderKanban,
+  Gauge,
   Images,
   ListChecks,
   ScanLine,
@@ -22,7 +23,8 @@ export type Section =
   | "library"
   | "review"
   | "label"
-  | "capture";
+  | "capture"
+  | "eval";
 
 const items: Array<{ id: Section; label: string; icon: LucideIcon }> = [
   { id: "projects", label: "Projects", icon: FolderKanban },
@@ -31,6 +33,7 @@ const items: Array<{ id: Section; label: string; icon: LucideIcon }> = [
   { id: "review", label: "Review", icon: ListChecks },
   { id: "label", label: "Label", icon: Tags },
   { id: "capture", label: "Capture lab", icon: ScanLine },
+  { id: "eval", label: "Evaluate", icon: Gauge },
 ];
 
 type SidebarProps = {
