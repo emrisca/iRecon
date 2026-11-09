@@ -1,5 +1,6 @@
 import {
   Crosshair,
+  Eye,
   FolderKanban,
   Images,
   ListChecks,
@@ -37,9 +38,20 @@ type SidebarProps = {
   onSelect: (section: Section) => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
+  live: boolean;
+  liveBusy: boolean;
+  onToggleLive: () => void;
 };
 
-export function AppSidebar({ section, onSelect, theme, onToggleTheme }: SidebarProps) {
+export function AppSidebar({
+  section,
+  onSelect,
+  theme,
+  onToggleTheme,
+  live,
+  liveBusy,
+  onToggleLive,
+}: SidebarProps) {
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-card">
       <div className="flex items-center gap-2 p-2.5">
@@ -75,13 +87,20 @@ export function AppSidebar({ section, onSelect, theme, onToggleTheme }: SidebarP
           );
         })}
 
-        <div className="flex h-8 items-center gap-2 px-2 text-sm text-muted-foreground">
-          <Crosshair className="size-5" aria-hidden="true" />
+        <Button
+          variant={live ? "secondary" : "ghost"}
+          size="sm"
+          className="justify-start gap-2"
+          disabled={liveBusy}
+          aria-pressed={live}
+          onClick={onToggleLive}
+        >
+          <Eye className="size-5" aria-hidden="true" />
           Live view
-          <Badge variant="outline" className="ml-auto">
-            later
+          <Badge variant={live ? "default" : "outline"} className="ml-auto">
+            {live ? "on" : "off"}
           </Badge>
-        </div>
+        </Button>
       </nav>
 
       <div className="mt-auto flex flex-col gap-2 border-t border-border p-2">

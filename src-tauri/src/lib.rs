@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
@@ -25,6 +26,12 @@ pub struct AppState {
     pub stats: Arc<Mutex<Option<capture::CaptureStats>>>,
     pub detector: Arc<Mutex<Option<detector::Detector>>>,
     pub loaded_model: Arc<Mutex<Option<String>>>,
+    /// True while a screen in the app is showing frames, so the capture thread
+    /// does not encode a preview nobody looks at.
+    pub preview_watch: Arc<AtomicBool>,
+    /// True while the transparent overlay is on screen. Detection events are
+    /// only emitted for a visible consumer.
+    pub overlay_visible: Arc<AtomicBool>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -42,6 +49,8 @@ pub fn run() {
                 stats: Arc::new(Mutex::new(None)),
                 detector: Arc::new(Mutex::new(None)),
                 loaded_model: Arc::new(Mutex::new(None)),
+                preview_watch: Arc::new(AtomicBool::new(false)),
+                overlay_visible: Arc::new(AtomicBool::new(false)),
             });
 
             // Load a verified model in the background so the window opens immediately.
@@ -94,6 +103,7 @@ pub fn run() {
             capture::capture_start,
             capture::capture_stop,
             capture::capture_status,
+            capture::capture_watch,
             overlay::overlay_show,
             overlay::overlay_hide,
         ])

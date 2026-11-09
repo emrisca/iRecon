@@ -1,7 +1,13 @@
 import { useState } from "react";
 
 import { AppSidebar, type Section } from "./components/app-sidebar";
-import { isDesktop } from "./lib/api";
+import {
+  hideOverlay,
+  isDesktop,
+  showOverlay,
+  startCapture,
+  stopCapture,
+} from "./lib/api";
 import { useTheme } from "./hooks/use-theme";
 import { CaptureLabPage } from "./pages/capture-lab";
 import { LabelPage } from "./pages/label";
@@ -12,7 +18,30 @@ import { SourcesPage } from "./pages/sources";
 
 export default function App() {
   const [section, setSection] = useState<Section>("projects");
+  const [live, setLive] = useState(false);
+  const [liveBusy, setLiveBusy] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
   const { theme, toggle } = useTheme();
+
+  async function toggleLive() {
+    setLiveBusy(true);
+    setLiveError(null);
+    try {
+      if (live) {
+        await hideOverlay();
+        await stopCapture();
+        setLive(false);
+      } else {
+        await startCapture();
+        await showOverlay();
+        setLive(true);
+      }
+    } catch (reason) {
+      setLiveError(String(reason));
+    } finally {
+      setLiveBusy(false);
+    }
+  }
 
   return (
     <div className="flex h-full min-h-0 bg-background text-foreground">
@@ -21,8 +50,16 @@ export default function App() {
         onSelect={setSection}
         theme={theme}
         onToggleTheme={toggle}
+        live={live}
+        liveBusy={liveBusy}
+        onToggleLive={toggleLive}
       />
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {liveError ? (
+          <p role="alert" className="border-b border-border p-2 text-sm text-destructive">
+            {liveError}
+          </p>
+        ) : null}
         {!isDesktop ? (
           <div className="border-b border-border bg-muted px-2.5 py-2 text-xs text-muted-foreground">
             Browser preview. Writes stay in memory and screen capture is unavailable.

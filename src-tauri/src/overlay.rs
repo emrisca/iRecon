@@ -1,4 +1,8 @@
+use std::sync::atomic::Ordering;
+
 use tauri::{AppHandle, Manager};
+
+use crate::AppState;
 
 #[tauri::command]
 pub fn overlay_show(app: AppHandle) -> Result<(), String> {
@@ -24,6 +28,9 @@ pub fn overlay_show(app: AppHandle) -> Result<(), String> {
         .set_ignore_cursor_events(true)
         .map_err(|e| e.to_string())?;
     window.show().map_err(|e| e.to_string())?;
+    app.state::<AppState>()
+        .overlay_visible
+        .store(true, Ordering::Relaxed);
     Ok(())
 }
 
@@ -32,5 +39,9 @@ pub fn overlay_hide(app: AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("overlay")
         .ok_or("The overlay window is missing")?;
-    window.hide().map_err(|e| e.to_string())
+    window.hide().map_err(|e| e.to_string())?;
+    app.state::<AppState>()
+        .overlay_visible
+        .store(false, Ordering::Relaxed);
+    Ok(())
 }

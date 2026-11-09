@@ -525,8 +525,8 @@ pub fn examples_list(app: AppHandle, class_id: i64) -> Result<Vec<ExampleView>, 
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let mut statement = conn
         .prepare(
-            "select id, class_id, path, bbox, role, created_at from example
-             where class_id = ?1 order by id desc",
+            "select id, class_id, path, coalesce(bbox, ''), role, created_at
+             from example where class_id = ?1 order by id desc",
         )
         .map_err(|e| e.to_string())?;
     let rows = statement

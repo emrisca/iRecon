@@ -99,6 +99,14 @@ pub fn capture_status(state: tauri::State<'_, AppState>) -> Option<CaptureStats>
     state.stats.lock().ok().and_then(|guard| guard.clone())
 }
 
+/// Tells the capture thread whether a screen is showing frames. Without a
+/// watcher the preview is never encoded, which is most of the cost of a frame
+/// nobody asked for.
+#[tauri::command]
+pub fn capture_watch(state: tauri::State<'_, AppState>, watching: bool) {
+    state.preview_watch.store(watching, Ordering::Relaxed);
+}
+
 #[tauri::command]
 pub fn capture_start(
     app: AppHandle,
@@ -134,6 +142,8 @@ pub fn capture_start(
     });
     let stats = state.stats.clone();
     let detector = state.detector.clone();
+    let preview_watch = state.preview_watch.clone();
+    let overlay_visible = state.overlay_visible.clone();
     let app_handle = app.clone();
 
     thread::Builder::new()
@@ -217,12 +227,14 @@ pub fn capture_start(
                         size = (image.width(), image.height());
                         window_cost += tick.elapsed();
 
-                        if last_preview.elapsed() >= PREVIEW_INTERVAL {
+                        if preview_watch.load(Ordering::Relaxed)
+                            && last_preview.elapsed() >= PREVIEW_INTERVAL
+                        {
                             let (bytes, width, height) =
-                                bmp_preview(image.as_raw(), image.width(), image.height());
+                                jpeg_preview(image.as_raw(), image.width(), image.height());
                             let payload = FramePayload {
                                 data: format!(
-                                    "data:image/bmp;base64,{}",
+                                    "data:image/jpeg;base64,{}",
                                     base64::engine::general_purpose::STANDARD.encode(bytes)
                                 ),
                                 width,
@@ -232,7 +244,19 @@ pub fn capture_start(
                             last_preview = Instant::now();
                         }
 
-                        if let Ok(mut guard) = detector.lock() {
+                        if pool.examples == 0 {
+                            // Nothing can match, so the inference would be spent on
+                            // scores the app throws away.
+                            detections = 0;
+                            best_score = None;
+                            best_class = None;
+                            if note.is_none() {
+                                note = Some(
+                                    "No examples in this project yet, so no proposal can match a class."
+                                        .to_string(),
+                                );
+                            }
+                        } else if let Ok(mut guard) = detector.lock() {
                             if let Some(model) = guard.as_mut() {
                                 model_name = Some(model.describe());
                                 match model.analyse(
@@ -306,21 +330,19 @@ pub fn capture_start(
                                         }
                                         let tracked = tracker.update(matched);
                                         detections = tracked.len() as u32;
-                                        if pool.examples == 0 && note.is_none() {
-                                            note = Some(
-                                                "No examples in this project yet, so no proposal can match a class."
-                                                    .to_string(),
+                                        if preview_watch.load(Ordering::Relaxed)
+                                            || overlay_visible.load(Ordering::Relaxed)
+                                        {
+                                            let _ = app_handle.emit(
+                                                "spike:detections",
+                                                DetectionPayload {
+                                                    width: image.width(),
+                                                    height: image.height(),
+                                                    inference_ms: elapsed,
+                                                    boxes: tracked,
+                                                },
                                             );
                                         }
-                                        let _ = app_handle.emit(
-                                            "spike:detections",
-                                            DetectionPayload {
-                                                width: image.width(),
-                                                height: image.height(),
-                                                inference_ms: elapsed,
-                                                boxes: tracked,
-                                            },
-                                        );
                                     }
                                     Err(error) => {
                                         note = Some(error);
@@ -514,9 +536,10 @@ pub(crate) fn crop_region(
     Some(crop)
 }
 
-/// A spike-only preview encoder. It downsamples the frame by sampling and writes a
-/// 32-bit BMP, so the preview needs no image crate and no PNG encoder.
-fn bmp_preview(raw: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+/// Downsamples the frame by sampling and encodes a small JPEG. The preview is
+/// the one thing that crosses IPC every second, so a compressed image matters
+/// more here than encode time.
+fn jpeg_preview(raw: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
     if width == 0 || height == 0 || raw.len() < 4 {
         return (Vec::new(), 0, 0);
     }
@@ -525,46 +548,26 @@ fn bmp_preview(raw: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
     let out_height = ((out_width as f32) * (height as f32) / (width as f32))
         .round()
         .max(1.0) as u32;
-    let stride = (out_width * 4) as usize;
-    let mut pixels = vec![0u8; stride * out_height as usize];
-
+    let mut small = image::RgbImage::new(out_width, out_height);
     for y in 0..out_height {
         let source_y = (y as u64 * height as u64 / out_height as u64) as u32;
         for x in 0..out_width {
             let source_x = (x as u64 * width as u64 / out_width as u64) as u32;
             let source = ((source_y * width + source_x) * 4) as usize;
-            let target = (y * out_width * 4 + x * 4) as usize;
-            if source + 3 < raw.len() && target + 3 < pixels.len() {
-                pixels[target] = raw[source + 2];
-                pixels[target + 1] = raw[source + 1];
-                pixels[target + 2] = raw[source];
-                pixels[target + 3] = 255;
+            if source + 3 < raw.len() {
+                small.put_pixel(
+                    x,
+                    y,
+                    image::Rgb([raw[source], raw[source + 1], raw[source + 2]]),
+                );
             }
         }
     }
 
-    let file_size = 54 + pixels.len();
-    let mut out = Vec::with_capacity(file_size);
-    out.extend_from_slice(b"BM");
-    out.extend_from_slice(&(file_size as u32).to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&54u32.to_le_bytes());
-    out.extend_from_slice(&40u32.to_le_bytes());
-    out.extend_from_slice(&(out_width as i32).to_le_bytes());
-    out.extend_from_slice(&(out_height as i32).to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&32u16.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
-    out.extend_from_slice(&2835i32.to_le_bytes());
-    out.extend_from_slice(&2835i32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-
-    for row in (0..out_height).rev() {
-        let start = (row * out_width * 4) as usize;
-        out.extend_from_slice(&pixels[start..start + out_width as usize * 4]);
+    let mut out = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 65);
+    match encoder.encode_image(&small) {
+        Ok(()) => (out, out_width, out_height),
+        Err(_) => (Vec::new(), 0, 0),
     }
-
-    (out, out_width, out_height)
 }

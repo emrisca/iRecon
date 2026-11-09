@@ -27,6 +27,7 @@ import {
   showOverlay,
   startCapture,
   stopCapture,
+  watchCapture,
 } from "../lib/api";
 import type {
   CaptureStats,
@@ -66,6 +67,8 @@ export function CaptureLabPage() {
   useEffect(() => {
     let alive = true;
     const cleanups: Array<() => void> = [];
+    // Frames are only encoded while this page can show them.
+    void watchCapture(true);
 
     void (async () => {
       const offStats = await onStats((next) => {
@@ -95,6 +98,7 @@ export function CaptureLabPage() {
 
     return () => {
       alive = false;
+      void watchCapture(false);
       for (const cleanup of cleanups) cleanup();
     };
   }, []);

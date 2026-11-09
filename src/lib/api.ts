@@ -301,6 +301,11 @@ export async function startCapture(projectId?: number): Promise<void> {
   await invoke("capture_start", { projectId });
 }
 
+export async function watchCapture(watching: boolean): Promise<void> {
+  if (!isDesktop) return;
+  await invoke("capture_watch", { watching });
+}
+
 export async function stopCapture(): Promise<void> {
   if (!isDesktop) return;
   await invoke("capture_stop");
