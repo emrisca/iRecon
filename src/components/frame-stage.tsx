@@ -19,7 +19,9 @@ type FrameStageProps = {
   frame: FrameView;
   box: Box | null;
   onBox: (box: Box | null) => void;
+  overlay?: Array<{ box: Box; color?: string }>;
   action?: ReactNode;
+  fitToFrame?: boolean;
   className?: string;
 };
 
@@ -32,22 +34,24 @@ function clampScale(value: number) {
 }
 
 /**
- * A small image viewer: wheel pans, Command or Control with the wheel zooms
- * around the pointer, Space-drag, right-drag or middle-drag pans, drag draws a
- * box, and double click fits the frame again. The picture is transformed with
- * CSS rather than resized, so zoom cannot feed back into layout and the box is
- * drawn in screen space so its border stays one pixel at any zoom.
+ * A frame-sized image viewer: scroll zooms around the pointer, Shift-drag,
+ * Space-drag, right-drag or middle-drag pans, drag draws a box, and double
+ * click fits the frame again. The picture is transformed with CSS rather than
+ * resized, so zoom cannot feed back into layout and the box is drawn in screen
+ * space so its border stays one pixel at any zoom.
  */
 export function FrameStage({
   frame,
   box,
   onBox,
+  overlay = [],
   action,
-  className = "h-[70vh]",
+  fitToFrame = true,
+  className = "",
 }: FrameStageProps) {
   const viewport = useRef<HTMLDivElement | null>(null);
   const picture = useRef<HTMLImageElement | null>(null);
-  const [baseWidth, setBaseWidth] = useState(0);
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [draft, setDraft] = useState<Box | null>(null);
@@ -56,16 +60,26 @@ export function FrameStage({
   const panStart = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const spaceHeld = useRef(false);
 
-  const baseHeight = baseWidth > 0 ? (baseWidth * frame.height) / frame.width : 0;
+  const aspect = frame.width / Math.max(1, frame.height);
+  const baseWidth =
+    viewportSize.width === 0
+      ? 0
+      : fitToFrame
+        ? viewportSize.width
+        : viewportSize.height > 0
+          ? Math.min(viewportSize.width, viewportSize.height * aspect)
+          : viewportSize.width;
+  const baseHeight = baseWidth > 0 ? baseWidth / aspect : 0;
   const viewWidth = baseWidth * scale;
   const viewHeight = baseHeight * scale;
 
   useEffect(() => {
     const element = viewport.current;
     if (!element) return;
-    // Measured once per resize and capped at the window width, so a bad
-    // measurement can never ask for a bitmap wider than the screen.
-    const measure = () => setBaseWidth(Math.min(element.clientWidth, window.innerWidth));
+    // The fit view follows the viewport width. The fullscreen view also
+    // limits the frame to the available height so it cannot be clipped.
+    const measure = () =>
+      setViewportSize({ width: element.clientWidth, height: element.clientHeight });
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
@@ -78,8 +92,8 @@ export function FrameStage({
   }, [frame.id]);
 
   const limit = useCallback((value: number, content: number, view: number) => {
-    const span = content - view;
-    return span <= 0 ? span / 2 : Math.min(0, Math.max(-span, value));
+    if (content <= view) return (view - content) / 2;
+    return Math.min(0, Math.max(view - content, value));
   }, []);
 
   const contain = useCallback(
@@ -104,18 +118,14 @@ export function FrameStage({
     const onWheel = (event: WheelEvent) => {
       if (baseWidth === 0) return;
       event.preventDefault();
-      if (event.ctrlKey || event.metaKey) {
-        const next = clampScale(scale * Math.exp(-event.deltaY * 0.0022));
-        if (next === scale) return;
-        const rect = element.getBoundingClientRect();
-        const px = event.clientX - rect.left;
-        const py = event.clientY - rect.top;
-        const factor = next / scale;
-        setOffset(contain(px - (px - offset.x) * factor, py - (py - offset.y) * factor, next));
-        setScale(next);
-        return;
-      }
-      setOffset(contain(offset.x - event.deltaX, offset.y - event.deltaY, scale));
+      const next = clampScale(scale * Math.exp(-event.deltaY * 0.0022));
+      if (next === scale) return;
+      const rect = element.getBoundingClientRect();
+      const px = event.clientX - rect.left;
+      const py = event.clientY - rect.top;
+      const factor = next / scale;
+      setOffset(contain(px - (px - offset.x) * factor, py - (py - offset.y) * factor, next));
+      setScale(next);
     };
     element.addEventListener("wheel", onWheel, { passive: false });
     return () => element.removeEventListener("wheel", onWheel);
@@ -153,7 +163,12 @@ export function FrameStage({
       // A pointer that already left the window cannot be captured; the drag
       // still works from the events that do arrive.
     }
-    const pan = event.button === 1 || event.button === 2 || event.altKey || spaceHeld.current;
+    const pan =
+      event.button === 1 ||
+      event.button === 2 ||
+      event.altKey ||
+      event.shiftKey ||
+      spaceHeld.current;
     if (pan) {
       panStart.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y };
       setPanning(true);
@@ -230,8 +245,13 @@ export function FrameStage({
     <div className="flex flex-col gap-1.5">
       <div
         ref={viewport}
-        className={`relative overflow-hidden rounded-md border border-border bg-muted ${className}`}
-        style={{ cursor: panning ? "grabbing" : "crosshair" }}
+        className={`relative overflow-hidden rounded-md border border-border bg-muted ${
+          fitToFrame ? "w-full" : ""
+        } ${className}`}
+        style={{
+          aspectRatio: fitToFrame ? `${frame.width} / ${frame.height}` : undefined,
+          cursor: panning ? "grabbing" : "crosshair",
+        }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -260,6 +280,19 @@ export function FrameStage({
             className="pointer-events-none block h-full w-full select-none"
           />
         </div>
+        {overlay.map((entry, index) => (
+          <div
+            key={`${index}-${entry.box.x}-${entry.box.y}`}
+            className="pointer-events-none absolute border-2 ring-1 ring-black/60"
+            style={{
+              left: offset.x + entry.box.x * viewWidth,
+              top: offset.y + entry.box.y * viewHeight,
+              width: entry.box.w * viewWidth,
+              height: entry.box.h * viewHeight,
+              borderColor: entry.color ?? "white",
+            }}
+          />
+        ))}
         {active ? (
           <div
             className="pointer-events-none absolute border border-white ring-1 ring-black/60"

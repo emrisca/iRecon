@@ -30,6 +30,7 @@ fn frame_row_to_view(
     width: u32,
     height: u32,
     created_at: String,
+    examples: i64,
     thumbs: &Path,
 ) -> FrameView {
     let thumb = thumbs.join(format!("{id}.jpg"));
@@ -54,18 +55,21 @@ fn frame_row_to_view(
         height,
         preview,
         created_at,
+        examples,
     }
 }
 
 #[tauri::command]
 pub fn library_list(app: AppHandle, project_id: i64) -> Result<Vec<FrameView>, String> {
     let state = app.state::<AppState>();
-    let rows: Vec<(i64, String, u32, u32, String)> = {
+    let rows: Vec<(i64, String, u32, u32, String, i64)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let mut statement = conn
             .prepare(
-                "select id, path, width, height, created_at from frame
-                 where project_id = ?1 order by id desc",
+                "select f.id, f.path, f.width, f.height, f.created_at,
+                        (select count(*) from example e where e.frame_id = f.id)
+                 from frame f
+                 where f.project_id = ?1 order by f.id desc",
             )
             .map_err(|e| e.to_string())?;
         let rows = statement
@@ -76,6 +80,7 @@ pub fn library_list(app: AppHandle, project_id: i64) -> Result<Vec<FrameView>, S
                     row.get::<_, u32>(2)?,
                     row.get::<_, u32>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -91,8 +96,8 @@ pub fn library_list(app: AppHandle, project_id: i64) -> Result<Vec<FrameView>, S
     std::fs::create_dir_all(&thumbs).map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
-        .map(|(id, path, width, height, created_at)| {
-            frame_row_to_view(id, path, width, height, created_at, &thumbs)
+        .map(|(id, path, width, height, created_at, examples)| {
+            frame_row_to_view(id, path, width, height, created_at, examples, &thumbs)
         })
         .collect())
 }
@@ -101,10 +106,11 @@ pub fn library_list(app: AppHandle, project_id: i64) -> Result<Vec<FrameView>, S
 pub fn library_frame(app: AppHandle, frame_id: i64) -> Result<FrameView, String> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let (id, path, width, height, created_at, project_id) = conn
+    let (id, path, width, height, created_at, project_id, examples) = conn
         .query_row(
-            "select id, path, width, height, created_at, project_id
-             from frame where id = ?1",
+            "select f.id, f.path, f.width, f.height, f.created_at, f.project_id,
+                    (select count(*) from example e where e.frame_id = f.id)
+             from frame f where f.id = ?1",
             params![frame_id],
             |row| {
                 Ok((
@@ -114,6 +120,7 @@ pub fn library_frame(app: AppHandle, frame_id: i64) -> Result<FrameView, String>
                     row.get::<_, u32>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             },
         )
@@ -128,6 +135,7 @@ pub fn library_frame(app: AppHandle, frame_id: i64) -> Result<FrameView, String>
         width,
         height,
         created_at,
+        examples,
         &thumbs,
     ))
 }

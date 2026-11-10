@@ -357,6 +357,7 @@ pub fn source_frame(app: AppHandle, project_id: i64, id: i64) -> Result<label::F
         height: image.height(),
         preview: label::preview(&image),
         created_at,
+        examples: 0,
     })
 }
 

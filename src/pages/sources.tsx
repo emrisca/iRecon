@@ -241,6 +241,7 @@ export function SourcesPage() {
           height: preview.height,
           preview: preview.data,
           createdAt: "",
+          examples: 0,
         }
       : null;
 
@@ -251,7 +252,7 @@ export function SourcesPage() {
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Sources"
-        description="Where a project reads frames from. A display or a window is live, an image or a folder is a replay, and the crop keeps only the part of the frame the project cares about."
+        description="Choose where frames come from. A display or window is live; an image or folder replays. A crop keeps only the region you need."
         action={
           <Button
             size="sm"
@@ -354,17 +355,22 @@ export function SourcesPage() {
                 </div>
               )
             ) : (
-              <Input
-                value={path}
-                onChange={(event) => setPath(event.target.value)}
-                placeholder={kind === "folder" ? "C:\\shots\\traffic" : "C:\\shots\\frame.png"}
-                aria-label={kind === "folder" ? "Folder path" : "Image path"}
-              />
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="source-path" className="text-xs text-muted-foreground">
+                  {kind === "folder" ? "Folder path" : "Image path"}
+                </label>
+                <Input
+                  id="source-path"
+                  value={path}
+                  onChange={(event) => setPath(event.target.value)}
+                  placeholder={kind === "folder" ? "C:\\shots\\traffic" : "C:\\shots\\frame.png"}
+                />
+              </div>
             )}
 
             <Button
               size="sm"
-              className="mt-0.5 gap-1.5 self-start"
+              className="gap-1.5 self-start"
               disabled={!projectId || busy || !canAdd}
               onClick={add}
             >
@@ -394,7 +400,7 @@ export function SourcesPage() {
           </CardHeader>
           <CardContent className="min-w-0">
             {frame ? (
-              <FrameStage frame={frame} box={box} onBox={setBox} className="h-[46vh]" />
+              <FrameStage frame={frame} box={box} onBox={setBox} />
             ) : busy ? (
               <Skeleton className="aspect-video w-full" />
             ) : (
@@ -416,7 +422,7 @@ export function SourcesPage() {
                   if (active) void select(active);
                 }}
               >
-                Grab frame
+                Refresh preview
               </Button>
               <Button
                 size="sm"
@@ -441,14 +447,15 @@ export function SourcesPage() {
           <CardHeader>
             <CardTitle>Project sources</CardTitle>
             <CardDescription>
-              {sources.length === 1 ? "1 source" : `${sources.length} sources`} for this
-              project. A source belongs to the project that picked it.
+              {sources.length === 0
+                ? "No sources in this project yet."
+                : `${sources.length === 1 ? "1 source" : `${sources.length} sources`} for this project. A source belongs to the project that picked it.`}
             </CardDescription>
           </CardHeader>
           <CardContent>
             {sources.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No sources yet. Add a display, a window, an image or a folder above.
+                Add a display, a window, an image or a folder above.
               </p>
             ) : (
               <ul className="overflow-hidden rounded-lg border border-border">

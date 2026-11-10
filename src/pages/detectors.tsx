@@ -3,6 +3,7 @@ import { RefreshCw, Trash2 } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
 import {
   Card,
   CardContent,
@@ -166,7 +167,7 @@ export function DetectorsPage() {
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Detectors"
-        description="Import a project-trained ONNX model, validate its input and output contract, warm it up, then compare it with the shipped detector on the same recorded session."
+        description="Import a project ONNX model, check its contract, then compare it with the shipped detector on a recording."
       />
 
       {!isDesktop ? (
@@ -218,20 +219,29 @@ export function DetectorsPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-2">
-                <input
-                  value={path}
-                  onChange={(event) => setPath(event.target.value)}
-                  placeholder="C:\\models\\robot.onnx"
-                  aria-label="ONNX model path"
-                  className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
-                />
-                <input
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Name (optional)"
-                  aria-label="Detector name"
-                  className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
-                />
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="detector-path" className="text-xs text-muted-foreground">
+                    Model file
+                  </label>
+                  <Input
+                    id="detector-path"
+                    value={path}
+                    onChange={(event) => setPath(event.target.value)}
+                    placeholder="C:\\models\\robot.onnx"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="detector-name" className="text-xs text-muted-foreground">
+                    Name
+                  </label>
+                  <Input
+                    id="detector-name"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="Robot detector"
+                    maxLength={64}
+                  />
+                </div>
                 <Button
                   size="sm"
                   disabled={busy || !path.trim()}
@@ -246,13 +256,15 @@ export function DetectorsPage() {
               <CardHeader>
                 <CardTitle>Project models</CardTitle>
                 <CardDescription>
-                  {detectors.length === 1 ? "1 imported detector" : `${detectors.length} imported detectors`}
+                  {detectors.length === 0
+                    ? "No project detector yet."
+                    : detectors.length === 1
+                      ? "1 imported detector"
+                      : `${detectors.length} imported detectors`}
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-1.5">
-                {detectors.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No project detector yet.</p>
-                ) : (
+                {detectors.length === 0 ? null : (
                   detectors.map((row) => (
                     <div
                       key={row.id}
@@ -264,7 +276,7 @@ export function DetectorsPage() {
                     >
                       <button
                         type="button"
-                        className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
+                        className="flex min-w-0 flex-1 flex-col gap-1.5 text-left"
                         onClick={() => setDetectorId(row.id)}
                       >
                         <span className="truncate text-sm font-medium">{row.name}</span>
@@ -314,43 +326,59 @@ export function DetectorsPage() {
                 </p>
               ) : (
                 <>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <select
-                      value={detectorId ?? ""}
-                      onChange={(event) => setDetectorId(Number(event.target.value) || null)}
-                      aria-label="Project detector"
-                      className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
-                    >
-                      <option value="">Pick a detector</option>
-                      {detectors.map((row) => (
-                        <option key={row.id} value={row.id}>
-                          {row.name}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={sessionId ?? ""}
-                      onChange={(event) => setSessionId(Number(event.target.value) || null)}
-                      aria-label="Recorded session"
-                      className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
-                    >
-                      <option value="">Pick a session</option>
-                      {sessions.map((row) => (
-                        <option key={row.id} value={row.id}>
-                          Session {row.id} · {row.frames} frames
-                        </option>
-                      ))}
-                    </select>
-                    <Button
-                      size="sm"
-                      className="gap-1.5"
-                      disabled={busy || !detectorId || !sessionId}
-                      onClick={compare}
-                    >
-                      <RefreshCw className="size-4" aria-hidden="true" />
-                      {busy ? "Running..." : "Compare"}
-                    </Button>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="flex min-w-0 flex-col gap-1.5">
+                      <label
+                        htmlFor="compare-detector"
+                        className="text-xs text-muted-foreground"
+                      >
+                        Detector
+                      </label>
+                      <select
+                        id="compare-detector"
+                        value={detectorId ?? ""}
+                        onChange={(event) => setDetectorId(Number(event.target.value) || null)}
+                        className="h-9 w-full rounded-md border border-input bg-background px-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                      >
+                        <option value="">Pick a detector</option>
+                        {detectors.map((row) => (
+                          <option key={row.id} value={row.id}>
+                            {row.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex min-w-0 flex-col gap-1.5">
+                      <label
+                        htmlFor="compare-session"
+                        className="text-xs text-muted-foreground"
+                      >
+                        Session
+                      </label>
+                      <select
+                        id="compare-session"
+                        value={sessionId ?? ""}
+                        onChange={(event) => setSessionId(Number(event.target.value) || null)}
+                        className="h-9 w-full rounded-md border border-input bg-background px-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                      >
+                        <option value="">Pick a session</option>
+                        {sessions.map((row) => (
+                          <option key={row.id} value={row.id}>
+                            Session {row.id} · {row.frames} frames
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
+                  <Button
+                    size="sm"
+                    className="gap-1.5 self-start"
+                    disabled={busy || !detectorId || !sessionId}
+                    onClick={compare}
+                  >
+                    <RefreshCw className="size-4" aria-hidden="true" />
+                    {busy ? "Comparing" : "Compare"}
+                  </Button>
 
                   {comparison ? (
                     <>
@@ -358,11 +386,11 @@ export function DetectorsPage() {
                         {[comparison.shipped, comparison.project].map((side) => (
                           <div key={side.name} className="rounded-lg border border-border p-2">
                             <span className="text-sm font-medium">{side.name}</span>
-                            <span className="mt-0.5 block text-xs text-muted-foreground">
+                            <span className="mt-1.5 block text-xs text-muted-foreground">
                               {side.inputSize} px · {side.frames} frames ·{" "}
                               {side.averageMs.toFixed(1)} ms average
                             </span>
-                            <span className="mt-1 block text-xs tabular-nums">
+                            <span className="mt-1.5 block text-xs tabular-nums">
                               {side.proposals} proposals · {side.matches} matches
                             </span>
                           </div>

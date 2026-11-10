@@ -14,12 +14,23 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::capture::pick_monitor;
 
-/// Share of pixels that must move before a hidden window is considered gone.
+/// Share of a hidden window's rectangle that must change before it is
+/// considered gone.
 ///
-/// Hiding the main window rewrites the whole area it covered, so a genuine grab
-/// clears this by a wide margin, while a clock tick or a moving cursor sits far
-/// below it.
-const WINDOW_GONE_FRACTION: f32 = 0.004;
+/// The rectangle is checked on its own, never the whole display: motion in
+/// another window must not stand in for iRecon disappearing. Hiding an opaque
+/// window rewrites the area it covered, so a genuine grab clears this by a wide
+/// margin, while a clock tick or a moving cursor stays far below it.
+const WINDOW_GONE_FRACTION: f32 = 0.08;
+
+/// The part of the captured image an app window covered before it was hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowRegion {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
 
 /// A display the app can read pixels from.
 ///
@@ -123,6 +134,11 @@ fn grab_with_hidden_windows(app: &AppHandle, source: &dyn ScreenSource) -> Resul
         })
         .collect();
 
+    let regions = before
+        .as_ref()
+        .map(|image| window_regions(&windows, image))
+        .unwrap_or_default();
+
     let shown: Vec<&WebviewWindow> = windows
         .iter()
         .filter(|(_, was_visible)| *was_visible)
@@ -153,7 +169,7 @@ fn grab_with_hidden_windows(app: &AppHandle, source: &dyn ScreenSource) -> Resul
         std::thread::sleep(Duration::from_millis(if attempt == 0 { 80 } else { 110 }));
         match source.capture() {
             Ok(image) => {
-                if frame_is_clear(before.as_ref(), &image) {
+                if frame_is_clear(before.as_ref(), &image, &regions) {
                     captured = Some(image);
                     clear = true;
                     break;
@@ -182,20 +198,99 @@ fn grab_with_hidden_windows(app: &AppHandle, source: &dyn ScreenSource) -> Resul
         }
         (true, Some(error)) => error,
         (true, None) => {
-            "iRecon hid itself, but the screen never changed, so the frame would still contain \
-             the app. Nothing was saved; press Grab frame again."
+            "iRecon hid itself, but the area it covered did not change, so the frame \
+             would still contain the app. Nothing was saved; close any other iRecon \
+             window or browser preview and press Grab frame again."
                 .to_string()
         }
     })
 }
 
+/// The app windows that were on screen, in capture-image coordinates. A window
+/// on another display is clipped to nothing and cannot affect this grab.
+fn window_regions(windows: &[(WebviewWindow, bool)], image: &RgbaImage) -> Vec<WindowRegion> {
+    let image_width = image.width() as i64;
+    let image_height = image.height() as i64;
+    windows
+        .iter()
+        .filter(|(_, was_visible)| *was_visible)
+        .filter_map(|(window, _)| {
+            let position = window.outer_position().ok()?;
+            let size = window.outer_size().ok()?;
+            let left = (position.x as i64).clamp(0, image_width);
+            let top = (position.y as i64).clamp(0, image_height);
+            let right = (position.x as i64 + size.width as i64).clamp(0, image_width);
+            let bottom = (position.y as i64 + size.height as i64).clamp(0, image_height);
+            if right <= left || bottom <= top {
+                return None;
+            }
+            Some(WindowRegion {
+                x: left as u32,
+                y: top as u32,
+                width: (right - left) as u32,
+                height: (bottom - top) as u32,
+            })
+        })
+        .collect()
+}
+
 /// A frame is clear only when a reference captured while the app was visible
-/// exists and the picture has moved well past the threshold. No reference means
-/// no proof, and no proof means no frame.
-fn frame_is_clear(before: Option<&RgbaImage>, after: &RgbaImage) -> bool {
-    before
-        .map(|previous| changed_fraction(previous, after) > WINDOW_GONE_FRACTION)
-        .unwrap_or(false)
+/// exists and every visible app window's rectangle moved well past the
+/// threshold. No reference means no proof, and no proof means no frame.
+fn frame_is_clear(
+    before: Option<&RgbaImage>,
+    after: &RgbaImage,
+    regions: &[WindowRegion],
+) -> bool {
+    let Some(previous) = before else {
+        return false;
+    };
+    if previous.dimensions() != after.dimensions() {
+        return true;
+    }
+    if regions.is_empty() {
+        return changed_fraction(previous, after) > WINDOW_GONE_FRACTION;
+    }
+    regions
+        .iter()
+        .all(|region| changed_fraction_in_region(previous, after, *region) > WINDOW_GONE_FRACTION)
+}
+
+/// Share of pixels in one rectangle whose colour moved enough to count as a
+/// change. This is the proof that the window covering that rectangle is gone.
+fn changed_fraction_in_region(
+    left: &RgbaImage,
+    right: &RgbaImage,
+    region: WindowRegion,
+) -> f32 {
+    if left.dimensions() != right.dimensions() {
+        return 1.0;
+    }
+    let x0 = region.x.min(left.width());
+    let y0 = region.y.min(left.height());
+    let x1 = (region.x + region.width).min(left.width());
+    let y1 = (region.y + region.height).min(left.height());
+    if x1 <= x0 || y1 <= y0 {
+        return 1.0;
+    }
+    let (left_raw, right_raw) = (left.as_raw(), right.as_raw());
+    let stride = left.width() as usize * 4;
+    let mut changed = 0usize;
+    let mut total = 0usize;
+    for y in y0..y1 {
+        let row = y as usize * stride;
+        for x in x0..x1 {
+            let index = row + x as usize * 4;
+            let delta = (left_raw[index] as i32 - right_raw[index] as i32).abs()
+                + (left_raw[index + 1] as i32 - right_raw[index + 1] as i32).abs()
+                + (left_raw[index + 2] as i32 - right_raw[index + 2] as i32).abs();
+            if delta > 24 {
+                changed += 1;
+            }
+            total += 1;
+        }
+    }
+    changed as f32 / total.max(1) as f32
 }
 
 /// Share of pixels whose colour moved enough to count as a change.
@@ -262,11 +357,20 @@ mod tests {
         assert_eq!(plan_for(&Composited), GrabPlan::HideFirst);
     }
 
+    fn region(x: u32, y: u32, width: u32, height: u32) -> WindowRegion {
+        WindowRegion {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
     #[test]
     fn an_unchanged_screen_is_not_clear() {
         let before = canvas(800, 600);
         let after = before.clone();
-        assert!(!frame_is_clear(Some(&before), &after));
+        assert!(!frame_is_clear(Some(&before), &after, &[]));
     }
 
     #[test]
@@ -274,7 +378,7 @@ mod tests {
         let before = canvas(800, 600);
         let mut after = before.clone();
         paint(&mut after, 300, 300, 12, 18);
-        assert!(!frame_is_clear(Some(&before), &after));
+        assert!(!frame_is_clear(Some(&before), &after, &[]));
     }
 
     #[test]
@@ -282,13 +386,49 @@ mod tests {
         let before = canvas(800, 600);
         let mut after = before.clone();
         paint(&mut after, 100, 100, 480, 360);
-        assert!(frame_is_clear(Some(&before), &after));
+        assert!(frame_is_clear(Some(&before), &after, &[]));
+    }
+
+    #[test]
+    fn motion_outside_the_app_window_is_not_clear() {
+        let before = canvas(800, 600);
+        let mut after = before.clone();
+        paint(&mut after, 600, 100, 100, 100);
+        assert!(!frame_is_clear(
+            Some(&before),
+            &after,
+            &[region(100, 100, 480, 360)]
+        ));
+    }
+
+    #[test]
+    fn the_app_window_area_changing_is_clear() {
+        let before = canvas(800, 600);
+        let mut after = before.clone();
+        paint(&mut after, 100, 100, 480, 360);
+        assert!(frame_is_clear(
+            Some(&before),
+            &after,
+            &[region(100, 100, 480, 360)]
+        ));
+    }
+
+    #[test]
+    fn one_unchanged_app_window_is_not_clear() {
+        let before = canvas(800, 600);
+        let mut after = before.clone();
+        paint(&mut after, 100, 100, 480, 360);
+        assert!(!frame_is_clear(
+            Some(&before),
+            &after,
+            &[region(100, 100, 480, 360), region(620, 100, 100, 100)]
+        ));
     }
 
     #[test]
     fn a_grab_without_a_reference_is_refused() {
         let after = canvas(800, 600);
-        assert!(!frame_is_clear(None, &after));
+        assert!(!frame_is_clear(None, &after, &[]));
     }
 
     #[test]

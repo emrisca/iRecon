@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { AppSidebar, type Section } from "./components/app-sidebar";
+import { SidebarContext } from "./components/sidebar-context";
 import {
   hideOverlay,
   isDesktop,
@@ -22,10 +23,40 @@ import { SourcesPage } from "./pages/sources";
 
 export default function App() {
   const [section, setSection] = useState<Section>("home");
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return window.localStorage.getItem("irecon.sidebar") !== "closed";
+  });
   const [live, setLive] = useState(false);
   const [liveBusy, setLiveBusy] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
   const { theme, toggle } = useTheme();
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarOpen((current) => !current);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("irecon.sidebar", sidebarOpen ? "open" : "closed");
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "b") return;
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest("input, textarea, select, [contenteditable='true']")
+      ) {
+        return;
+      }
+      event.preventDefault();
+      toggleSidebar();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [toggleSidebar]);
 
   async function toggleLive() {
     setLiveBusy(true);
@@ -48,40 +79,55 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-full min-h-0 bg-background text-foreground">
-      <AppSidebar
-        section={section}
-        onSelect={setSection}
-        theme={theme}
-        onToggleTheme={toggle}
-        live={live}
-        liveBusy={liveBusy}
-        onToggleLive={toggleLive}
-      />
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {liveError ? (
-          <p role="alert" className="border-b border-border p-2 text-sm text-destructive">
-            {liveError}
-          </p>
+    <SidebarContext.Provider
+      value={{
+        open: sidebarOpen,
+        toggle: toggleSidebar,
+        live,
+        liveBusy,
+        onToggleLive: toggleLive,
+      }}
+    >
+      <div className="flex h-full min-h-0 bg-background text-foreground">
+        {sidebarOpen ? (
+          <AppSidebar
+            section={section}
+            onSelect={setSection}
+            theme={theme}
+            onToggleTheme={toggle}
+            live={live}
+            liveBusy={liveBusy}
+            onToggleLive={toggleLive}
+          />
         ) : null}
-        {!isDesktop ? (
-          <div className="border-b border-border bg-muted px-2.5 py-2 text-xs text-muted-foreground">
-            Browser preview. Writes stay in memory and screen capture is unavailable.
+        <main id="main-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {liveError ? (
+            <p
+              role="alert"
+              className="border-b border-border p-2 text-sm text-destructive"
+            >
+              {liveError}
+            </p>
+          ) : null}
+          {!isDesktop ? (
+            <div className="border-b border-border bg-muted px-2.5 py-2 text-xs text-muted-foreground">
+              Browser preview. Writes stay in memory and screen capture is unavailable.
+            </div>
+          ) : null}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {section === "home" ? <HomePage onSelect={setSection} /> : null}
+            {section === "projects" ? <ProjectsPage /> : null}
+            {section === "sources" ? <SourcesPage /> : null}
+            {section === "library" ? <LibraryPage /> : null}
+            {section === "review" ? <ReviewPage /> : null}
+            {section === "label" ? <LabelPage /> : null}
+            {section === "capture" ? <CaptureLabPage onRunningChange={setLive} /> : null}
+            {section === "sessions" ? <SessionsPage /> : null}
+            {section === "detectors" ? <DetectorsPage /> : null}
+            {section === "eval" ? <EvalPage /> : null}
           </div>
-        ) : null}
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {section === "home" ? <HomePage onSelect={setSection} /> : null}
-          {section === "projects" ? <ProjectsPage /> : null}
-          {section === "sources" ? <SourcesPage /> : null}
-          {section === "library" ? <LibraryPage /> : null}
-          {section === "review" ? <ReviewPage /> : null}
-          {section === "label" ? <LabelPage /> : null}
-          {section === "capture" ? <CaptureLabPage /> : null}
-          {section === "sessions" ? <SessionsPage /> : null}
-          {section === "detectors" ? <DetectorsPage /> : null}
-          {section === "eval" ? <EvalPage /> : null}
-        </div>
-      </main>
-    </div>
+        </main>
+      </div>
+    </SidebarContext.Provider>
   );
 }

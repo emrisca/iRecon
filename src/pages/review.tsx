@@ -233,7 +233,7 @@ export function ReviewPage() {
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Review"
-        description="Detections that landed just under their class threshold, waiting for an answer. Accepting writes a positive example, rejecting writes a negative, and both change the next run."
+        description="Candidates just below their class threshold. Accept writes a positive example; reject writes a negative."
         action={
           <Button size="sm" variant="outline" onClick={() => setShowAll((current) => !current)}>
             {showAll ? "Show pending" : "Show reviewed"}
@@ -286,7 +286,7 @@ export function ReviewPage() {
         <div className="p-2.5">
           <div className="rounded-lg border border-border bg-muted p-2.5">
             <p className="text-sm font-medium">Nothing to review</p>
-            <p className="mt-1 max-w-[65ch] text-xs text-muted-foreground">
+            <p className="mt-1.5 max-w-[65ch] text-xs text-muted-foreground">
               {showAll
                 ? "No candidate has been harvested for this project yet."
                 : "Start capture with a model loaded. Proposals that score within 12 percent under their class threshold are saved here, up to forty per session."}
@@ -337,7 +337,7 @@ export function ReviewPage() {
                       >
                         <Check className="size-4" aria-hidden="true" />
                         Accept as positive
-                        <kbd className="ml-0.5 rounded border border-current/30 px-1 text-[10px] font-medium opacity-70">
+                        <kbd className="ml-1.5 rounded border border-current/30 px-1.5 text-xs font-medium opacity-70">
                           A
                         </kbd>
                       </Button>
@@ -351,7 +351,7 @@ export function ReviewPage() {
                       >
                         <X className="size-4" aria-hidden="true" />
                         Reject as negative
-                        <kbd className="ml-0.5 rounded border border-current/30 px-1 text-[10px] font-medium opacity-70">
+                        <kbd className="ml-1.5 rounded border border-current/30 px-1.5 text-xs font-medium opacity-70">
                           R
                         </kbd>
                       </Button>
@@ -365,7 +365,7 @@ export function ReviewPage() {
                       >
                         <SkipForward className="size-4" aria-hidden="true" />
                         Skip
-                        <kbd className="ml-0.5 rounded border border-current/30 px-1 text-[10px] font-medium opacity-70">
+                        <kbd className="ml-1.5 rounded border border-current/30 px-1.5 text-xs font-medium opacity-70">
                           S
                         </kbd>
                       </Button>
@@ -465,7 +465,7 @@ export function ReviewPage() {
                   ))}
                 </ul>
                 {visibleCount < candidates.length ? (
-                  <div className="flex items-center justify-between gap-2 px-1 pt-2">
+                  <div className="flex items-center justify-between gap-2 px-1.5 pt-2">
                     <span className="text-xs text-muted-foreground tabular-nums">
                       Showing {visibleCount} of {candidates.length}
                     </span>

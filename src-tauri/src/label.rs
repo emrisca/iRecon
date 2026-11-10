@@ -34,6 +34,8 @@ pub struct FrameView {
     pub height: u32,
     pub preview: String,
     pub created_at: String,
+    /// Number of saved examples on this frame, across every class.
+    pub examples: i64,
 }
 
 #[derive(Clone, Serialize)]
@@ -213,6 +215,7 @@ pub fn frame_grab(app: AppHandle, project_id: i64) -> Result<FrameView, String> 
         height: image.height(),
         preview: preview(&image),
         created_at,
+        examples: 0,
     })
 }
 

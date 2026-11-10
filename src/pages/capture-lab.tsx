@@ -10,7 +10,6 @@ import {
   CardHeader,
   CardTitle,
 } from "../components/ui/card";
-import { Separator } from "../components/ui/separator";
 import { Skeleton } from "../components/ui/skeleton";
 import { PageHeader } from "../components/page-header";
 import {
@@ -47,9 +46,9 @@ import type {
   SourceView,
 } from "../lib/types";
 
-function metric(value: string, label: string) {
+function Metric({ value, label }: { value: string; label: string }) {
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-card p-2">
+    <div className="flex flex-col gap-1.5 rounded-md bg-muted p-2">
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className="text-2xl font-medium tabular-nums">{value}</span>
     </div>
@@ -60,7 +59,11 @@ function megabytes(bytes: number) {
   return (bytes / 1_000_000).toFixed(0);
 }
 
-export function CaptureLabPage() {
+export function CaptureLabPage({
+  onRunningChange,
+}: {
+  onRunningChange?: (running: boolean) => void;
+} = {}) {
   const [stats, setStats] = useState<CaptureStats | null>(null);
   const [frame, setFrame] = useState<FramePayload | null>(null);
   const [detections, setDetections] = useState<DetectionPayload | null>(null);
@@ -89,6 +92,7 @@ export function CaptureLabPage() {
         if (!alive) return;
         setStats(next);
         setRunning(next.running);
+        onRunningChange?.(next.running);
       });
       const offFrame = await onFrame((next) => {
         if (alive) setFrame(next);
@@ -184,9 +188,11 @@ export function CaptureLabPage() {
       if (running) {
         await stopCapture();
         setRunning(false);
+        onRunningChange?.(false);
       } else {
         await startCapture(projectId ?? undefined, record, sourceId);
         setRunning(true);
+        onRunningChange?.(true);
       }
     } catch (reason) {
       setError(String(reason));
@@ -264,14 +270,13 @@ export function CaptureLabPage() {
     }
   }
 
-  const resolution = stats && stats.width > 0 ? `${stats.width} by ${stats.height}` : "none";
   const activeName = catalog?.models.find((entry) => entry.active)?.name;
 
   return (
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Capture lab"
-        description="Screen capture, the detector and the overlay in one place. Frames per second and inference cost here are the numbers the plan asks for."
+        description="Screen capture, the detector and the overlay. Every number here is measured on this machine."
         action={
           <Button
             size="sm"
@@ -302,111 +307,124 @@ export function CaptureLabPage() {
         </p>
       ) : null}
 
-      <div className="flex flex-wrap items-center gap-2 border-b border-border p-2.5">
-        <span className="text-xs text-muted-foreground">Project</span>
-        {projects.length === 0 ? (
-          <span className="text-sm text-muted-foreground">
-            Create a project on the Projects page so boxes can be matched.
-          </span>
-        ) : (
-          projects.map((project) => (
-            <Button
-              key={project.id}
-              size="sm"
-              variant={project.id === projectId ? "secondary" : "ghost"}
+      <div className="flex flex-col gap-2.5 border-b border-border p-2.5">
+        <div className="grid gap-2.5 lg:grid-cols-2">
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <span className="text-xs text-muted-foreground">Project</span>
+            <div className="flex flex-wrap gap-1.5">
+              {projects.length === 0 ? (
+                <span className="text-sm text-muted-foreground">
+                  Create a project on Projects so boxes can be matched.
+                </span>
+              ) : (
+                projects.map((project) => (
+                  <Button
+                    key={project.id}
+                    size="sm"
+                    variant={project.id === projectId ? "secondary" : "ghost"}
+                    disabled={running}
+                    onClick={() => setProjectId(project.id)}
+                  >
+                    {project.name}
+                  </Button>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <span className="text-xs text-muted-foreground">Source</span>
+            <div className="flex flex-wrap gap-1.5">
+              <Button
+                size="sm"
+                variant={sourceId === null ? "secondary" : "ghost"}
+                disabled={running}
+                onClick={() => setSourceId(null)}
+              >
+                Primary display
+              </Button>
+              {sources.map((source) => (
+                <Button
+                  key={source.id}
+                  size="sm"
+                  variant={source.id === sourceId ? "secondary" : "ghost"}
+                  disabled={running}
+                  title={`${source.kind}: ${source.target}`}
+                  onClick={() => setSourceId(source.id)}
+                >
+                  {source.label}
+                </Button>
+              ))}
+            </div>
+            {sources.length === 0 ? (
+              <span className="text-xs text-muted-foreground">
+                Add a source on Sources to replay a file or folder.
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex h-8 items-center gap-1.5 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="size-4 accent-primary"
+              checked={record}
               disabled={running}
-              onClick={() => setProjectId(project.id)}
-            >
-              {project.name}
-            </Button>
-          ))
-        )}
-        <label className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={record}
-            disabled={running}
-            onChange={(event) => setRecord(event.target.checked)}
-          />
-          Record session
-        </label>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 border-b border-border p-2.5">
-        <span className="text-xs text-muted-foreground">Source</span>
-        <Button
-          size="sm"
-          variant={sourceId === null ? "secondary" : "ghost"}
-          disabled={running}
-          onClick={() => setSourceId(null)}
-        >
-          Primary display
-        </Button>
-        {sources.map((source) => (
-          <Button
-            key={source.id}
-            size="sm"
-            variant={source.id === sourceId ? "secondary" : "ghost"}
-            disabled={running}
-            title={`${source.kind}: ${source.target}`}
-            onClick={() => setSourceId(source.id)}
-          >
-            {source.label}
-          </Button>
-        ))}
-        {sources.length === 0 ? (
-          <span className="text-xs text-muted-foreground">
-            Add a display, window, file or folder on the project page to replay it here.
-          </span>
-        ) : null}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 border-b border-border p-2.5">
-        <label
-          htmlFor="match-floor"
-          className="text-xs text-muted-foreground"
-        >
-          Match floor
-        </label>
-        <input
-          id="match-floor"
-          type="range"
-          min={0}
-          max={100}
-          step={5}
-          value={Math.round(floor * 100)}
-          onChange={(event) => void changeFloor(Number(event.target.value))}
-          className="w-40 accent-foreground"
-        />
-        <span className="text-sm tabular-nums">{Math.round(floor * 100)}%</span>
-        <span className="text-xs text-muted-foreground">
-          Boxes and review candidates below this score are dropped.
-        </span>
+              onChange={(event) => setRecord(event.target.checked)}
+            />
+            Record session
+          </label>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <label htmlFor="match-floor" className="text-xs text-muted-foreground">
+              Match floor
+            </label>
+            <input
+              id="match-floor"
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={Math.round(floor * 100)}
+              onChange={(event) => void changeFloor(Number(event.target.value))}
+              className="w-40 accent-primary"
+            />
+            <span className="text-sm tabular-nums">{Math.round(floor * 100)}%</span>
+          </div>
+        </div>
       </div>
 
       <div className="flex flex-col gap-2.5 p-2.5">
         <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-          {metric(stats ? stats.fps.toFixed(1) : "0.0", "Frames per second")}
-          {metric(stats ? `${stats.frameGapMs.toFixed(1)} ms` : "0 ms", "Frame interval")}
-          {metric(stats ? `${stats.captureP50Ms.toFixed(1)} ms` : "0 ms", "Capture p50")}
-          {metric(stats ? `${stats.captureP95Ms.toFixed(1)} ms` : "0 ms", "Capture p95")}
-          {metric(stats ? `${stats.preprocessMs.toFixed(1)} ms` : "0 ms", "Preprocess")}
-          {metric(
-            detections ? `${detections.inferenceMs.toFixed(1)} ms` : "0 ms",
-            "Inference cost"
-          )}
-          {metric(stats ? `${stats.matchMs.toFixed(1)} ms` : "0 ms", "Matcher cost")}
-          {metric(detections ? `${detections.latencyMs.toFixed(1)} ms` : "0 ms", "Frame to box")}
+          <Metric value={stats ? stats.fps.toFixed(1) : "0.0"} label="Frames per second" />
+          <Metric
+            value={detections ? `${detections.inferenceMs.toFixed(1)} ms` : "0 ms"}
+            label="Inference"
+          />
+          <Metric value={stats ? `${stats.matchMs.toFixed(1)} ms` : "0 ms"} label="Matcher" />
+          <Metric
+            value={detections ? `${detections.latencyMs.toFixed(1)} ms` : "0 ms"}
+            label="Frame to box"
+          />
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant="outline">{stats?.backend ?? "idle"}</Badge>
           <span className="tabular-nums">
-            {stats
-              ? `${stats.dropped} dropped of ${stats.frames} captured`
-              : "no frames yet"}
+            {stats ? `${stats.frameGapMs.toFixed(1)} ms interval` : "no frames yet"}
           </span>
-          {stats && stats.captureMaxMs > 0 ? (
-            <span className="tabular-nums">worst frame {stats.captureMaxMs.toFixed(1)} ms</span>
+          {stats ? (
+            <span className="tabular-nums">
+              capture {stats.captureP50Ms.toFixed(1)} p50, {stats.captureP95Ms.toFixed(1)} p95
+              {stats.captureMaxMs > 0 ? `, ${stats.captureMaxMs.toFixed(1)} worst` : ""}
+            </span>
+          ) : null}
+          {stats ? (
+            <span className="tabular-nums">{stats.preprocessMs.toFixed(1)} ms preprocess</span>
+          ) : null}
+          {stats ? (
+            <span className="tabular-nums">
+              {stats.dropped} dropped of {stats.frames}
+            </span>
           ) : null}
           {stats?.width ? (
             <span className="tabular-nums">
@@ -467,9 +485,8 @@ export function CaptureLabPage() {
             <div className="flex flex-col gap-1.5">
               <CardTitle>Models</CardTitle>
               <CardDescription>
-                Two RF-DETR sizes, both Apache 2.0. A download is checked against a
-                pinned SHA-256 before it is loaded, stays on this machine, and is never
-                uploaded anywhere.
+                Two RF-DETR sizes, both Apache 2.0. Each download is checked against a
+                pinned SHA-256 and stays on this machine.
               </CardDescription>
             </div>
             <Badge variant={activeName ? "default" : "outline"}>
@@ -496,7 +513,7 @@ export function CaptureLabPage() {
                 return (
                   <div
                     key={entry.id}
-                    className="flex flex-col gap-1.5 rounded-lg border border-border p-2"
+                    className="flex flex-col gap-1.5 border-t border-border py-2 first:border-t-0 first:pt-0"
                   >
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-sm font-medium">{entry.name}</span>
@@ -602,45 +619,6 @@ export function CaptureLabPage() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>What this build does not do yet</CardTitle>
-            <CardDescription>
-              Boxes are the loaded model's proposals, kept only when a class in the
-              selected project scores above that class's threshold. Each box keeps a track
-              id while it overlaps from frame to frame, and a single missed frame no longer
-              blanks it. Capture reads a duplication session, so frames arrive without a
-              screenshot per frame; a file or folder source replays at twenty a second.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Separator />
-            <ul className="flex flex-col gap-2 text-sm">
-              <li className="flex items-start gap-2">
-                <span className="mt-2 size-1 shrink-0 rounded-full bg-muted-foreground" />
-                <span>
-                  macOS asks for Screen Recording the first time capture runs. Grant it to
-                  iRecon in System Settings, then restart the app or the frame stays black.
-                </span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="mt-2 size-1 shrink-0 rounded-full bg-muted-foreground" />
-                <span>
-                  An exclusive fullscreen game owns the display, so the overlay cannot
-                  appear over it. Borderless windowed is the supported mode.
-                </span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="mt-2 size-1 shrink-0 rounded-full bg-muted-foreground" />
-                <span>
-                  Detection runs every frame on the CPU by default. The inference number
-                  above is the real cost on this machine, and it is the number to compare
-                  between the two model sizes.
-                </span>
-              </li>
-            </ul>
-          </CardContent>
-        </Card>
       </div>
     </div>
   );

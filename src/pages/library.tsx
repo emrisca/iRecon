@@ -129,7 +129,7 @@ export function LibraryPage() {
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Library"
-        description="Every frame this project can label, whether it was grabbed from the screen or imported. Imports are copied into the project folder, so the project stays one folder you can move or delete."
+        description="Every frame the project can label, grabbed or imported. Imports are copied into the project folder."
         action={
           <Button
             size="sm"
@@ -188,12 +188,17 @@ export function LibraryPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
-            <Input
-              value={paths}
-              onChange={(event) => setPaths(event.target.value)}
-              placeholder="C:\\shots\\a.png, C:\\shots\\b.jpg"
-              aria-label="Image paths, separated by commas"
-            />
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="image-paths" className="text-xs text-muted-foreground">
+                Image paths
+              </label>
+              <Input
+                id="image-paths"
+                value={paths}
+                onChange={(event) => setPaths(event.target.value)}
+                placeholder="C:\\shots\\a.png, C:\\shots\\b.jpg"
+              />
+            </div>
             <Button
               size="sm"
               className="gap-1.5 self-start"
@@ -206,12 +211,17 @@ export function LibraryPage() {
 
             <Separator />
 
-            <Input
-              value={folder}
-              onChange={(event) => setFolder(event.target.value)}
-              placeholder="C:\\shots\\traffic"
-              aria-label="Folder path"
-            />
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="import-folder" className="text-xs text-muted-foreground">
+                Folder
+              </label>
+              <Input
+                id="import-folder"
+                value={folder}
+                onChange={(event) => setFolder(event.target.value)}
+                placeholder="C:\\shots\\traffic"
+              />
+            </div>
             <Button
               size="sm"
               variant="outline"

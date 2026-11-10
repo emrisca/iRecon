@@ -13,7 +13,6 @@ import {
 import { PageHeader } from "../components/page-header";
 import { Skeleton } from "../components/ui/skeleton";
 import {
-  auditSession,
   deleteSession,
   evaluateSession,
   isDesktop,
@@ -26,7 +25,6 @@ import { formatDate } from "../lib/utils";
 import type {
   Detection,
   Project,
-  SessionAudit,
   SessionFrame,
   SessionView,
 } from "../lib/types";
@@ -47,7 +45,6 @@ export function SessionsPage() {
   const [playing, setPlaying] = useState(false);
   const [image, setImage] = useState<string | null>(null);
   const [evaluated, setEvaluated] = useState<Map<number, Detection[]> | null>(null);
-  const [audit, setAudit] = useState<SessionAudit | null>(null);
   const [loading, setLoading] = useState(true);
   const [framesLoading, setFramesLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -105,7 +102,6 @@ export function SessionsPage() {
       setFrameIndex(0);
       setPlaying(false);
       setEvaluated(null);
-      setAudit(null);
       return;
     }
     let alive = true;
@@ -118,7 +114,6 @@ export function SessionsPage() {
         setFrameIndex(0);
         setPlaying(false);
         setEvaluated(null);
-        setAudit(null);
       })
       .catch((reason: unknown) => {
         if (alive) setError(String(reason));
@@ -187,19 +182,6 @@ export function SessionsPage() {
     }
   }
 
-  async function runAudit() {
-    if (!selectedId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      setAudit(await auditSession(selectedId));
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function removeSession() {
     if (!selectedId) return;
     if (!window.confirm("Delete this recording and its frames?")) return;
@@ -223,7 +205,7 @@ export function SessionsPage() {
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Sessions"
-        description="Recorded capture, with the proposals kept alongside each frame. Replay at 1x or 10x, or run the current matcher pool over the recording without launching the game."
+        description="Recorded capture with proposals per frame. Replay it, or re-score it with the current pool without launching the game."
         action={
           <Button
             size="sm"
@@ -279,7 +261,7 @@ export function SessionsPage() {
         <div className="p-2.5">
           <div className="rounded-lg border border-border bg-muted p-2.5">
             <p className="text-sm font-medium">No recordings yet</p>
-            <p className="mt-1 max-w-[65ch] text-xs text-muted-foreground">
+            <p className="mt-1.5 max-w-[65ch] text-xs text-muted-foreground">
               In Capture lab, enable Record session before starting capture. Frames and
               detector proposals are written to the project folder, and stop capture ends
               the session. Old recordings are pruned to a 1 GB project budget.
@@ -303,8 +285,8 @@ export function SessionsPage() {
                   type="button"
                   className={
                     session.id === selectedId
-                      ? "flex flex-col gap-1 rounded-md border border-border bg-muted p-2 text-left"
-                      : "flex flex-col gap-1 rounded-md border border-border p-2 text-left hover:bg-muted"
+                      ? "flex flex-col gap-1.5 rounded-md border border-border bg-muted p-2 text-left"
+                      : "flex flex-col gap-1.5 rounded-md border border-border p-2 text-left hover:bg-muted"
                   }
                   onClick={() => setSelectedId(session.id)}
                 >
@@ -442,32 +424,6 @@ export function SessionsPage() {
                           Re-scores the recorded proposals with the current examples.
                         </span>
                       </div>
-
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="gap-1.5"
-                          disabled={busy}
-                          onClick={runAudit}
-                        >
-                          <RefreshCw className="size-4" aria-hidden="true" />
-                          Audit detector
-                        </Button>
-                        <span className="text-xs text-muted-foreground">
-                          Runs the loaded detector over these frames and counts proposals.
-                          Recorded frames are previews, so this reads low.
-                        </span>
-                      </div>
-
-                      {audit ? (
-                        <p className="text-xs text-muted-foreground tabular-nums">
-                          {audit.model}: {audit.frames} frames, {audit.proposals} proposals,{" "}
-                          {audit.primary} above the floor, {audit.vehicles} vehicle boxes,{" "}
-                          {audit.averageMs.toFixed(1)} ms per frame. Frames with no vehicle
-                          proposal: {audit.rows.filter((row) => row.vehicles === 0).length}.
-                        </p>
-                      ) : null}
 
                       <div className="flex items-center gap-2">
                         <span className="w-24 shrink-0 text-xs text-muted-foreground tabular-nums">

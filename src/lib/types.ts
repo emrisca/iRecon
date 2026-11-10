@@ -94,6 +94,8 @@ export type FrameView = {
   height: number;
   preview: string;
   createdAt: string;
+  /** Saved examples on this frame, across every class. */
+  examples: number;
 };
 
 export type LabelClass = {

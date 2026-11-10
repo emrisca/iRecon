@@ -149,7 +149,7 @@ export function EvalPage() {
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Evaluate"
-        description="Mark which classes each frame actually contains, then run the detector and matcher over the selection. Recall is the share of marked frames where a box cleared its class threshold."
+        description="Mark what each frame contains, then measure recall on a set you did not train on."
         action={
           <Button
             size="sm"
@@ -208,7 +208,7 @@ export function EvalPage() {
         <div className="p-2.5">
           <div className="rounded-lg border border-border bg-muted p-2.5">
             <p className="text-sm font-medium">No frames to evaluate</p>
-            <p className="mt-1 max-w-[65ch] text-xs text-muted-foreground">
+            <p className="mt-1.5 max-w-[65ch] text-xs text-muted-foreground">
               Grab or import frames on the Library page first. Held-out frames work
               best: label a different set than the one you drew examples on.
             </p>
@@ -258,7 +258,7 @@ export function EvalPage() {
                           <td className="py-1.5 text-right tabular-nums">{row.marked}</td>
                           <td className="py-1.5 text-right tabular-nums">{row.hits}</td>
                           <td className="py-1.5 text-right tabular-nums">
-                            {row.marked === 0 ? "—" : percent(row.hits / row.marked)}
+                            {row.marked === 0 ? "n/a" : percent(row.hits / row.marked)}
                           </td>
                           <td className="py-1.5 text-right tabular-nums">
                             {row.falsePositives}
@@ -282,7 +282,7 @@ export function EvalPage() {
                 <Gauge className="size-4" aria-hidden="true" />
                 Ground truth first
               </p>
-              <p className="mt-1 max-w-[75ch] text-xs text-muted-foreground">
+              <p className="mt-1.5 max-w-[75ch] text-xs text-muted-foreground">
                 Every frame starts unmarked. Click the class badges under a frame to
                 record what it contains, check the frames to include, then press
                 Evaluate. Marks persist, so a held-out set only needs labelling once.
@@ -344,13 +344,13 @@ export function EvalPage() {
                               classByName.get(box.label)?.color ?? "currentColor",
                           }}
                         >
-                          <span className="absolute -top-5 left-0 whitespace-nowrap bg-background/90 px-1 text-[10px] leading-4">
+                          <span className="absolute -top-5 left-0 whitespace-nowrap bg-background/90 px-1.5 text-xs leading-4">
                             {box.label} {percent(box.score)}
                           </span>
                         </div>
                       ))}
                     </div>
-                    <div className="flex flex-wrap gap-1">
+                    <div className="flex flex-wrap gap-1.5">
                       {classes.length === 0 ? (
                         <span className="text-xs text-muted-foreground">
                           No classes to mark.
@@ -366,8 +366,8 @@ export function EvalPage() {
                               disabled={busy}
                               className={
                                 present
-                                  ? "rounded-md border px-2 py-1 text-xs font-medium"
-                                  : "rounded-md border border-border px-2 py-1 text-xs text-muted-foreground"
+                                  ? "rounded-md border px-2 py-1.5 text-xs font-medium"
+                                  : "rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground"
                               }
                               style={
                                 present

@@ -219,6 +219,7 @@ function demoFrame(): FrameView {
     height,
     preview: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
     createdAt: new Date().toISOString(),
+    examples: 0,
   };
 }
 

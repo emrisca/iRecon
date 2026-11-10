@@ -25,9 +25,18 @@ type Props = {
  */
 export function SettingsMenu({ theme, onToggleTheme }: Props) {
   const [open, setOpen] = useState(false);
-  const [version, setVersion] = useState("0.1");
+  const [version, setVersion] = useState("0.3.0");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [update, setUpdate] = useState<{ install: () => Promise<void> } | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
 
   useEffect(() => {
     if (!isDesktop) return;
@@ -98,13 +107,14 @@ export function SettingsMenu({ theme, onToggleTheme }: Props) {
   }
 
   return (
-    <div className="relative flex items-center gap-1">
+    <div className="relative flex items-center gap-1.5">
       <Button
         variant="ghost"
         size="sm"
         className="flex-1 justify-start gap-2"
         aria-expanded={open}
         aria-haspopup="dialog"
+        aria-controls="settings-panel"
         onClick={() => setOpen((current) => !current)}
       >
         <Settings className="size-4" aria-hidden="true" />
@@ -129,16 +139,17 @@ export function SettingsMenu({ theme, onToggleTheme }: Props) {
 
       {open ? (
         <div
+          id="settings-panel"
           role="dialog"
           aria-label="Settings"
-          className="absolute bottom-full left-0 z-20 mb-2 flex w-64 flex-col gap-2 rounded-md border border-border bg-card p-2 shadow-md"
+          className="absolute bottom-full left-0 z-20 mb-2 flex w-52 flex-col gap-2 rounded-md border border-border bg-card p-2 shadow-lg"
         >
-          <div className="flex items-center justify-between gap-2 px-1">
+          <div className="flex items-center justify-between gap-2 px-1.5">
             <span className="text-sm font-medium">Settings</span>
             <span className="text-xs text-muted-foreground tabular-nums">v{version}</span>
           </div>
 
-          <p className="px-1 text-xs text-muted-foreground">
+          <p className="px-1.5 text-xs text-muted-foreground">
             Updates are signed and installed in place. Nothing else leaves this machine.
           </p>
 
@@ -157,15 +168,15 @@ export function SettingsMenu({ theme, onToggleTheme }: Props) {
           </Button>
 
           {status.kind === "current" ? (
-            <p className="px-1 text-xs text-muted-foreground">This is the latest version.</p>
+            <p className="px-1.5 text-xs text-muted-foreground">This is the latest version.</p>
           ) : null}
           {status.kind === "available" ? (
             <div className="flex flex-col gap-1.5">
-              <p className="px-1 text-xs">
+              <p className="px-1.5 text-xs">
                 Version {status.version} is available.
               </p>
               {status.notes ? (
-                <p className="max-h-24 overflow-y-auto whitespace-pre-wrap px-1 text-xs text-muted-foreground">
+                <p className="max-h-24 overflow-y-auto whitespace-pre-wrap px-1.5 text-xs text-muted-foreground">
                   {status.notes}
                 </p>
               ) : null}
@@ -175,23 +186,23 @@ export function SettingsMenu({ theme, onToggleTheme }: Props) {
             </div>
           ) : null}
           {status.kind === "downloading" ? (
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1.5">
               <div className="h-1.5 overflow-hidden rounded-full bg-muted">
                 <div
                   className="h-full bg-primary transition-[width]"
                   style={{ width: `${Math.round(status.progress * 100)}%` }}
                 />
               </div>
-              <p className="px-1 text-xs text-muted-foreground tabular-nums">
+              <p className="px-1.5 text-xs text-muted-foreground tabular-nums">
                 Downloading {Math.round(status.progress * 100)}%
               </p>
             </div>
           ) : null}
           {status.kind === "restarting" ? (
-            <p className="px-1 text-xs text-muted-foreground">Installed. Restarting.</p>
+            <p className="px-1.5 text-xs text-muted-foreground">Installed. Restarting.</p>
           ) : null}
           {status.kind === "error" ? (
-            <p role="alert" className="px-1 text-xs text-destructive">
+            <p role="alert" className="px-1.5 text-xs text-destructive">
               {status.message}
             </p>
           ) : null}

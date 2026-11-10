@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Crop,
   Download,
+  Keyboard,
   Maximize2,
   Minimize2,
   Minus,
@@ -55,6 +56,36 @@ import type {
   Project,
 } from "../lib/types";
 
+const GRAB_SHORTCUT_KEY = "irecon.label.grabShortcut";
+
+function readGrabShortcut(): string | null {
+  if (typeof window === "undefined") return "G";
+  const saved = window.localStorage.getItem(GRAB_SHORTCUT_KEY);
+  if (saved === null) return "G";
+  if (saved === "none") return null;
+  return saved;
+}
+
+function shortcutLabel(key: string) {
+  if (key === " ") return "Space";
+  return key.length === 1 ? key.toUpperCase() : key;
+}
+
+function shortcutMatches(event: KeyboardEvent, shortcut: string) {
+  if (shortcut === "Space") return event.code === "Space";
+  return event.key.toLowerCase() === shortcut.toLowerCase();
+}
+
+type PendingBox = {
+  id: string;
+  box: Box;
+  className: string;
+  role: "positive" | "negative";
+  color: string;
+};
+
+let pendingBoxId = 0;
+
 function ExampleTile({ example }: { example: ExampleView }) {
   return (
     <li className="media-tile flex flex-col gap-1.5">
@@ -78,6 +109,7 @@ export function LabelPage() {
   const [classes, setClasses] = useState<LabelClass[]>([]);
   const [frame, setFrame] = useState<FrameView | null>(null);
   const [box, setBox] = useState<Box | null>(null);
+  const [pending, setPending] = useState<PendingBox[]>([]);
   const [fullscreen, setFullscreen] = useState(false);
   const [className, setClassName] = useState("");
   const [selected, setSelected] = useState<LabelClass | null>(null);
@@ -91,6 +123,12 @@ export function LabelPage() {
   const [library, setLibrary] = useState<FrameView[]>([]);
   const [rename, setRename] = useState("");
   const [advice, setAdvice] = useState<ClassAdvice[]>([]);
+  const [grabShortcut, setGrabShortcut] = useState<string | null>(readGrabShortcut);
+  const [recordingShortcut, setRecordingShortcut] = useState(false);
+
+  useEffect(() => {
+    window.localStorage.setItem(GRAB_SHORTCUT_KEY, grabShortcut ?? "none");
+  }, [grabShortcut]);
 
   useEffect(() => {
     let alive = true;
@@ -168,6 +206,7 @@ export function LabelPage() {
       });
     setFrame(null);
     setBox(null);
+    setPending([]);
     setFullscreen(false);
     setSelected(null);
     setExamples([]);
@@ -230,6 +269,60 @@ export function LabelPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [fullscreen]);
 
+  useEffect(() => {
+    if (!grabShortcut || recordingShortcut) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.repeat) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (!shortcutMatches(event, grabShortcut)) return;
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest("input, textarea, select, [contenteditable='true']")
+      ) {
+        return;
+      }
+      if (fullscreen || busy || !projectId || pending.length > 0) return;
+      event.preventDefault();
+      void grab();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, fullscreen, grabShortcut, pending.length, projectId, recordingShortcut]);
+
+  useEffect(() => {
+    if (!recordingShortcut) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape" || event.key === "Tab") {
+        setRecordingShortcut(false);
+        return;
+      }
+      if (event.key === "Backspace" || event.key === "Delete") {
+        setGrabShortcut(null);
+        setRecordingShortcut(false);
+        return;
+      }
+      if (
+        event.key === "Shift" ||
+        event.key === "Control" ||
+        event.key === "Alt" ||
+        event.key === "Meta" ||
+        event.key === "CapsLock" ||
+        event.key === "Dead" ||
+        event.key === "Unidentified"
+      ) {
+        return;
+      }
+      setGrabShortcut(shortcutLabel(event.key));
+      setRecordingShortcut(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recordingShortcut]);
+
   async function refreshClasses(id: number) {
     const rows = await listClasses(id);
     setClasses(rows);
@@ -246,6 +339,7 @@ export function LabelPage() {
       setExamples([]);
       setMatches([]);
       setBox(null);
+      setPending([]);
       setExportInfo(null);
       setClassName("");
     } catch (reason) {
@@ -256,13 +350,14 @@ export function LabelPage() {
   }
 
   async function grab() {
-    if (!projectId) return;
+    if (!projectId || pending.length > 0) return;
     setBusy(true);
     setError(null);
     try {
       const next = await grabFrame(projectId);
       setFrame(next);
       setBox(null);
+      setPending([]);
       setLibrary((current) => [next, ...current]);
     } catch (reason) {
       setError(String(reason));
@@ -278,6 +373,7 @@ export function LabelPage() {
       const next = await openFrame(id);
       setFrame(next);
       setBox(null);
+      setPending([]);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -286,26 +382,95 @@ export function LabelPage() {
   }
 
   async function save() {
-    if (!projectId || !frame || !box) return;
-    const name = className.trim();
-    if (!name) return;
+    if (!projectId || !frame) return;
+    const queued = [...pending];
+    let current: PendingBox | null = null;
+    if (box && className.trim()) {
+      const name = className.trim();
+      pendingBoxId += 1;
+      current = {
+        id: `box-${pendingBoxId}`,
+        box,
+        className: name,
+        role,
+        color:
+          classes.find((item) => item.name.toLowerCase() === name.toLowerCase())?.color ??
+          "var(--primary)",
+      };
+      queued.push(current);
+    }
+    if (queued.length === 0) return;
     setBusy(true);
     setError(null);
+    const saved = new Set<string>();
+    let lastClass: LabelClass | null = null;
+    let accounted = false;
     try {
-      let target = classes.find((item) => item.name.toLowerCase() === name.toLowerCase());
-      if (!target) {
-        target = await createClass(projectId, name);
+      const byName = new Map<string, LabelClass>();
+      for (const entry of queued) {
+        const key = entry.className.toLowerCase();
+        let target =
+          byName.get(key) ?? classes.find((item) => item.name.toLowerCase() === key);
+        if (!target) {
+          target = await createClass(projectId, entry.className);
+        }
+        byName.set(key, target);
+        await createExample(target.id, frame.id, entry.box, entry.role);
+        saved.add(entry.id);
+        lastClass = target;
       }
-      const created = await createExample(target.id, frame.id, box, role);
-      setBox(null);
-      setSelected(target);
-      setExamples((current) => [created, ...current]);
+      setPending((rows) => rows.filter((entry) => !saved.has(entry.id)));
+      if (current && saved.has(current.id)) setBox(null);
+      setLibrary((rows) =>
+        rows.map((entry) =>
+          entry.id === frame.id ? { ...entry, examples: entry.examples + saved.size } : entry
+        )
+      );
+      accounted = true;
+      if (lastClass) {
+        setSelected(lastClass);
+        const rows = await listExamples(lastClass.id).catch(() => null);
+        if (rows) setExamples(rows);
+      }
       await refreshClasses(projectId);
     } catch (reason) {
+      setPending((rows) => rows.filter((entry) => !saved.has(entry.id)));
+      if (current && saved.has(current.id)) setBox(null);
+      if (saved.size > 0 && !accounted) {
+        setLibrary((rows) =>
+          rows.map((entry) =>
+            entry.id === frame.id ? { ...entry, examples: entry.examples + saved.size } : entry
+          )
+        );
+        await refreshClasses(projectId).catch(() => {});
+      }
       setError(String(reason));
     } finally {
       setBusy(false);
     }
+  }
+
+  function addBox() {
+    if (!box || !className.trim()) return;
+    const name = className.trim();
+    pendingBoxId += 1;
+    setPending((current) => [
+      ...current,
+      {
+        id: `box-${pendingBoxId}`,
+        box,
+        className: name,
+        role,
+        color:
+          classes.find((item) => item.name.toLowerCase() === name.toLowerCase())?.color ??
+          "var(--primary)",
+      },
+    ]);
+    setBox(null);
+  }
+
+  function removePending(id: string) {
+    setPending((current) => current.filter((entry) => entry.id !== id));
   }
 
   async function exportData() {
@@ -391,6 +556,11 @@ export function LabelPage() {
 
   const positives = examples.filter((example) => example.role !== "negative");
   const negatives = examples.filter((example) => example.role === "negative");
+  const unlabeled = library.filter((entry) => entry.examples === 0).length;
+  const nextUnlabeled =
+    library.find((entry) => entry.examples === 0 && entry.id !== frame?.id) ?? null;
+  const readyCount = pending.length + (box && className.trim() ? 1 : 0);
+  const pendingOverlay = pending.map((entry) => ({ box: entry.box, color: entry.color }));
   const projectName = projects.find((project) => project.id === projectId)?.name;
   const fullscreenButton = (
     <Button
@@ -409,14 +579,51 @@ export function LabelPage() {
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Label"
-        description="Grab a frame, drag a box around the thing you care about, name it. Each save writes a crop into the project and becomes a new example."
+        description="Grab a frame, draw a box, name it. Each save becomes an example for the matcher."
         action={
-          <Button size="sm" className="gap-1.5" disabled={!projectId || busy} onClick={grab}>
-            <Crop className="size-4" aria-hidden="true" />
-            {busy ? "Working" : "Grab frame"}
-          </Button>
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              disabled={!projectId || busy}
+              onClick={exportData}
+            >
+              <Download className="size-4" aria-hidden="true" />
+              Export dataset
+            </Button>
+            <Button
+              size="sm"
+              className="gap-1.5"
+              disabled={!projectId || busy || pending.length > 0}
+              aria-keyshortcuts={grabShortcut ?? undefined}
+              title={
+                pending.length > 0
+                  ? "Save or remove the boxes on this frame first"
+                  : grabShortcut
+                    ? `Grab frame (${grabShortcut})`
+                    : "Grab frame"
+              }
+              onClick={grab}
+            >
+              <Crop className="size-4" aria-hidden="true" />
+              {busy ? "Working" : "Grab frame"}
+              {grabShortcut ? (
+                <kbd className="rounded border border-current/30 px-1.5 text-xs font-medium opacity-70">
+                  {grabShortcut}
+                </kbd>
+              ) : null}
+            </Button>
+          </>
         }
       />
+
+      {exportInfo ? (
+        <p className="border-b border-border p-2 text-xs text-muted-foreground tabular-nums">
+          Exported {exportInfo.frames} frames, {exportInfo.boxes} boxes, {exportInfo.skipped}{" "}
+          skipped.
+        </p>
+      ) : null}
 
       {error ? (
         <p role="alert" className="border-b border-border p-2 text-sm text-destructive">
@@ -463,8 +670,8 @@ export function LabelPage() {
               <div className="flex flex-col gap-1.5">
                 <CardTitle>Frame</CardTitle>
                 <CardDescription>
-                  Drag a box around one object. The crop is taken from the full
-                  resolution frame, not from the preview.
+                  Draw a box, add it, then draw the next object. The crop comes from the
+                  full resolution frame, not the preview.
                 </CardDescription>
               </div>
               {frame ? (
@@ -475,41 +682,103 @@ export function LabelPage() {
             </CardHeader>
             <CardContent className="min-w-0">
               {frame ? (
-                <FrameStage frame={frame} box={box} onBox={setBox} action={fullscreenButton} />
+                <FrameStage
+                  frame={frame}
+                  box={box}
+                  onBox={setBox}
+                  overlay={pendingOverlay}
+                  action={fullscreenButton}
+                />
               ) : (
                 <Skeleton className="aspect-video w-full" />
               )}
               {library.length > 0 ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-muted-foreground">Library</span>
-                  {library.slice(0, 8).map((entry) => (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Captured</span>
+                    <Badge variant="outline" className="tabular-nums">
+                      {unlabeled} unlabeled
+                    </Badge>
                     <Button
-                      key={entry.id}
-                      size="icon"
-                      variant={frame?.id === entry.id ? "secondary" : "outline"}
-                      aria-label={`Open frame ${entry.id}`}
-                      disabled={busy}
-                      onClick={() => open(entry.id)}
+                      size="sm"
+                      variant="outline"
+                      disabled={busy || pending.length > 0 || !nextUnlabeled}
+                      title={
+                        pending.length > 0
+                          ? "Save or remove the boxes on this frame first"
+                          : "Open the next unlabeled frame"
+                      }
+                      onClick={() => {
+                        if (nextUnlabeled) void open(nextUnlabeled.id);
+                      }}
                     >
-                      <img
-                        src={entry.preview}
-                        alt=""
-                        loading="lazy"
-                        decoding="async"
-                        className="size-8 rounded-sm object-cover"
-                      />
+                      Next unlabeled
                     </Button>
-                  ))}
+                  </div>
+                  <div className="flex gap-1.5 overflow-x-auto pb-1.5">
+                    {library.map((entry) => (
+                      <Button
+                        key={entry.id}
+                        size="icon"
+                        variant={frame?.id === entry.id ? "secondary" : "outline"}
+                        className="size-9 shrink-0"
+                        aria-label={`Open frame ${entry.id}, ${entry.examples} labels`}
+                        title={`Frame ${entry.id}, ${entry.examples} label${entry.examples === 1 ? "" : "s"}`}
+                        disabled={busy || pending.length > 0}
+                        onClick={() => open(entry.id)}
+                      >
+                        <img
+                          src={entry.preview}
+                          alt=""
+                          loading="lazy"
+                          decoding="async"
+                          className="size-8 rounded-sm object-cover"
+                        />
+                      </Button>
+                    ))}
+                  </div>
                 </div>
               ) : null}
               <div className="flex flex-col gap-2">
-                <p className="text-xs text-muted-foreground">
-                  {frame
-                    ? box
-                      ? `Box ${(box.w * 100).toFixed(1)}% wide, ${(box.h * 100).toFixed(1)}% tall. Scroll to pan, Command or Control with scroll to zoom, Space-drag or right-drag to move, double click to fit.`
-                      : "No box yet. Scroll to pan, Command or Control with scroll to zoom, then drag over the object."
-                    : "Press Grab frame. The app hides itself for a moment so it is not in the shot."}
-                </p>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <p className="max-w-[52ch] text-xs text-muted-foreground">
+                    {frame
+                      ? box
+                        ? `Box ${(box.w * 100).toFixed(1)}% wide, ${(box.h * 100).toFixed(1)}% tall. Add it to the frame, then draw the next object.`
+                        : pending.length > 0
+                          ? `${pending.length} box${pending.length === 1 ? "" : "es"} on this frame. Draw another, or save them together.`
+                          : "No box yet. Shift-drag to pan, scroll to zoom, then drag over the object."
+                      : grabShortcut
+                        ? `Press Grab frame or ${grabShortcut}. iRecon hides its own windows; other windows stay in the shot.`
+                        : "Press Grab frame. iRecon hides its own windows; other windows stay in the shot."}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">Grab shortcut</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="min-w-24 gap-1.5"
+                      aria-label="Change grab frame shortcut"
+                      aria-pressed={recordingShortcut}
+                      title="Click, then press a key. Backspace sets None. Escape cancels."
+                      onClick={() => setRecordingShortcut((current) => !current)}
+                      onBlur={() => setRecordingShortcut(false)}
+                    >
+                      <Keyboard className="size-4" aria-hidden="true" />
+                      {recordingShortcut ? "Press a key" : grabShortcut ?? "None"}
+                    </Button>
+                    {grabShortcut ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="Disable the grab frame shortcut"
+                        onClick={() => setGrabShortcut(null)}
+                      >
+                        None
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
                 {matches.length > 0 ? (
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs text-muted-foreground">Nearest</span>
@@ -524,43 +793,31 @@ export function LabelPage() {
                     ))}
                   </div>
                 ) : null}
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="gap-1.5"
-                    disabled={!projectId || busy}
-                    onClick={exportData}
-                  >
-                    <Download className="size-4" aria-hidden="true" />
-                    Export dataset
-                  </Button>
-                  {exportInfo ? (
-                    <span className="text-xs text-muted-foreground tabular-nums">
-                      {exportInfo.frames} frames, {exportInfo.boxes} boxes, {exportInfo.skipped} skipped
-                    </span>
-                  ) : null}
-                </div>
               </div>
             </CardContent>
           </Card>
 
           <Card className="min-w-0">
             <CardHeader>
-              <CardTitle>Class</CardTitle>
+              <CardTitle>Label boxes</CardTitle>
               <CardDescription>
-                Type a new name or pick an existing class. Saving adds the crop to that
-                class and updates its count.
+                Pick or create a class, add each box, then save them together. A new name
+                creates the class on save.
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <Input
-                value={className}
-                onChange={(event) => setClassName(event.target.value)}
-                placeholder="red car"
-                aria-label="Class name"
-                maxLength={40}
-              />
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="class-name" className="text-xs text-muted-foreground">
+                  Class name
+                </label>
+                <Input
+                  id="class-name"
+                  value={className}
+                  onChange={(event) => setClassName(event.target.value)}
+                  placeholder="red car"
+                  maxLength={40}
+                />
+              </div>
               {classes.length > 0 ? (
                 <div className="flex flex-wrap items-center gap-2">
                   {classes.map((item) => (
@@ -618,6 +875,43 @@ export function LabelPage() {
                   No classes yet. The first save creates one.
                 </p>
               )}
+              {pending.length > 0 ? (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">On this frame</span>
+                  <ul className="overflow-hidden rounded-md border border-border">
+                    {pending.map((entry, index) => (
+                      <li key={entry.id}>
+                        {index > 0 ? <Separator /> : null}
+                        <div className="flex flex-wrap items-center gap-2 p-2">
+                          <span
+                            className="size-2 rounded-full"
+                            style={{ backgroundColor: entry.color }}
+                            aria-hidden="true"
+                          />
+                          <span className="min-w-0 flex-1 truncate text-sm">
+                            {entry.className}
+                          </span>
+                          <Badge variant={entry.role === "positive" ? "secondary" : "outline"}>
+                            {entry.role}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground tabular-nums">
+                            {Math.round(entry.box.w * 100)}% by {Math.round(entry.box.h * 100)}%
+                          </span>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label={`Remove ${entry.className} box`}
+                            disabled={busy}
+                            onClick={() => removePending(entry.id)}
+                          >
+                            <Trash2 className="size-4" aria-hidden="true" />
+                          </Button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
@@ -635,16 +929,32 @@ export function LabelPage() {
                 </Button>
                 <Button
                   size="sm"
+                  variant="outline"
+                  className="gap-1.5"
                   disabled={!frame || !box || !className.trim() || busy}
+                  onClick={addBox}
+                >
+                  <Plus className="size-4" aria-hidden="true" />
+                  Add box
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={!frame || readyCount === 0 || busy}
                   onClick={save}
                 >
-                  Save example
+                  {readyCount === 1
+                    ? "Save example"
+                    : readyCount === 0
+                      ? "Save examples"
+                      : `Save ${readyCount} examples`}
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                {role === "positive"
-                  ? "A positive is the thing itself, which is what teaches the matcher to box it."
-                  : "A negative looks close but is not it, so saving one raises the bar for a match."}
+                {pending.length > 0
+                  ? `${pending.length} box${pending.length === 1 ? "" : "es"} on this frame. Save them together, or draw another.`
+                  : role === "positive"
+                    ? "A positive is the thing itself, which is what teaches the matcher to box it."
+                    : "A negative looks close but is not it, so saving one raises the bar for a match."}
               </p>
             </CardContent>
           </Card>
@@ -654,9 +964,8 @@ export function LabelPage() {
           <CardHeader>
             <CardTitle>Coverage</CardTitle>
             <CardDescription>
-              What the saved examples say about each class. The suggestion is the
-              midpoint between how alike your positives are and how close the nearest
-              negative sits; nothing changes until you apply it.
+              How your positives and negatives compare. The suggestion moves the
+              threshold only when you apply it.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -694,13 +1003,13 @@ export function LabelPage() {
                       ) : null}
                     </div>
                     {entry.hints.length > 0 ? (
-                      <ul className="mt-1 flex list-disc flex-col gap-0.5 pl-4 text-xs text-muted-foreground">
+                      <ul className="mt-1.5 flex list-disc flex-col gap-1.5 pl-2.5 text-xs text-muted-foreground">
                         {entry.hints.map((hint) => (
                           <li key={hint}>{hint}</li>
                         ))}
                       </ul>
                     ) : (
-                      <p className="mt-1 text-xs text-muted-foreground">Looks healthy.</p>
+                      <p className="mt-1.5 text-xs text-muted-foreground">Looks healthy.</p>
                     )}
                   </li>
                 ))}
@@ -841,10 +1150,12 @@ export function LabelPage() {
             frame={frame}
             box={box}
             onBox={setBox}
-            className="min-h-0 flex-1"
+            overlay={pendingOverlay}
+            fitToFrame={false}
+            className="h-[calc(100dvh-8rem)]"
             action={
               <span className="text-xs text-muted-foreground">
-                Escape closes. Scroll to pan, Command or Control with scroll to zoom.
+                Escape closes. Shift-drag to pan, scroll to zoom.
               </span>
             }
           />
