@@ -10,7 +10,7 @@ type PageHeaderProps = {
 };
 
 export function PageHeader({ title, description, action }: PageHeaderProps) {
-  const { open, toggle, live, liveBusy, onToggleLive } = useSidebar();
+  const { open, toggle, live, liveBusy, liveProject, onToggleLive } = useSidebar();
 
   return (
     <div className="flex flex-wrap items-start justify-between gap-2.5 border-b border-border p-2.5">
@@ -46,8 +46,12 @@ export function PageHeader({ title, description, action }: PageHeaderProps) {
               variant="outline"
               className="gap-2"
               disabled={liveBusy}
-              aria-label="Stop live capture"
-              title="Stop live capture"
+              aria-label={
+                liveProject ? `Stop live capture for ${liveProject}` : "Stop live capture"
+              }
+              title={
+                liveProject ? `Stop live capture for ${liveProject}` : "Stop live capture"
+              }
               onClick={onToggleLive}
             >
               <span className="size-2 rounded-full bg-primary" aria-hidden="true" />

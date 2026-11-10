@@ -82,6 +82,7 @@ export type DetectionPayload = {
   capturedAtMs: number;
   publishedAtMs: number;
   crop: Box | null;
+  colors: Record<string, string>;
   boxes: TrackedBox[];
 };
 
@@ -93,6 +94,8 @@ export type FrameView = {
   width: number;
   height: number;
   preview: string;
+  /** Thumbnail on disk, loaded through the asset protocol in the desktop app. */
+  thumbPath?: string;
   createdAt: string;
   /** Saved examples on this frame, across every class. */
   examples: number;
@@ -113,6 +116,8 @@ export type ExampleView = {
   width: number;
   height: number;
   preview: string;
+  /** Crop file on disk, loaded through the asset protocol in the desktop app. */
+  thumbPath?: string;
   bbox: string;
   role: "positive" | "negative";
   createdAt: string;
@@ -225,6 +230,23 @@ export type ImportReport = {
   errors: string[];
 };
 
+export type RoboflowReport = {
+  frames: number;
+  examples: number;
+  classes: number;
+  skipped: number;
+  cancelled: boolean;
+  errors: string[];
+};
+
+export type RoboflowProgress = {
+  processed: number;
+  total: number;
+  frames: number;
+  examples: number;
+  skipped: number;
+};
+
 export type ClassAdvice = {
   classId: number;
   name: string;
@@ -327,6 +349,7 @@ export type CandidateView = {
   color: string;
   path: string;
   thumb: string;
+  thumbPath?: string;
   score: number;
   state: "pending" | "accepted" | "rejected" | "skipped";
   createdAt: string;

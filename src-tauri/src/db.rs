@@ -91,6 +91,11 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             created_at text not null
         );
 
+        create table if not exists setting (
+            key text primary key,
+            value text not null
+        );
+
         create table if not exists candidate (
             id integer primary key autoincrement,
             project_id integer not null references project(id) on delete cascade,
@@ -163,7 +168,10 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     // Minimum match score for boxes and review candidates. Zero keeps the old
     // behaviour; the Capture lab slider raises it.
     ensure_column(&conn, "project", "match_floor", "real not null default 0.0")?;
-    conn.execute_batch("create index if not exists example_frame on example(frame_id);")?;
+    conn.execute_batch(
+        "create index if not exists example_frame on example(frame_id);
+         create index if not exists example_pool on example(class_id, role, id);",
+    )?;
 
     // Classes created before thresholds were measured still carry the old
     // 0.55 default, which accepted every unknown crop in the benchmark. Lift
@@ -305,6 +313,57 @@ pub fn project_create(
 }
 
 #[tauri::command]
+pub fn project_rename(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    name: String,
+) -> Result<Project, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Give the project a name".into());
+    }
+    if name.chars().count() > 64 {
+        return Err("Keep the name under 64 characters".into());
+    }
+    let root = projects_root(&app)?;
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let clash: Option<i64> = conn
+        .query_row(
+            "select id from project where lower(name) = lower(?1) and id != ?2",
+            params![name, id],
+            |row| row.get(0),
+        )
+        .ok();
+    if clash.is_some() {
+        return Err("A project with that name already exists".into());
+    }
+    // Only the display name changes. The slug names the project folder, and
+    // frame and example paths are stored absolute, so moving it would break them.
+    let changed = conn
+        .execute(
+            "update project set name = ?2 where id = ?1",
+            params![id, name],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("That project is gone".to_string());
+    }
+    conn.query_row(
+        "select p.id, p.name, p.slug, p.created_at,
+                (select count(*) from example e
+                 join class c on c.id = e.class_id
+                 where c.project_id = p.id),
+                (select count(*) from frame f where f.project_id = p.id),
+                (select count(*) from class c where c.project_id = p.id)
+         from project p where p.id = ?1",
+        params![id],
+        |row| row_to_project(row, &root),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn project_match_floor(
     state: tauri::State<'_, AppState>,
     project_id: i64,
@@ -332,6 +391,45 @@ pub fn project_set_match_floor(
     )
     .map_err(|e| e.to_string())?;
     Ok(floor)
+}
+
+#[tauri::command]
+pub fn setting_get(
+    state: tauri::State<'_, AppState>,
+    key: String,
+) -> Result<Option<String>, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("A setting needs a name".into());
+    }
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    Ok(conn
+        .query_row(
+            "select value from setting where key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok())
+}
+
+#[tauri::command]
+pub fn setting_set(
+    state: tauri::State<'_, AppState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("A setting needs a name".into());
+    }
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "insert into setting (key, value) values (?1, ?2)
+         on conflict(key) do update set value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

@@ -12,6 +12,7 @@
   "dependencies": {
     "@radix-ui/react-slot": "^1.5.0",
     "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
     "@tauri-apps/plugin-process": "^2.4.0",
     "@tauri-apps/plugin-updater": "^2.14.1",
     "class-variance-authority": "^0.7.1",

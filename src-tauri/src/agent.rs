@@ -216,7 +216,7 @@ fn run(app: &AppHandle, project_id: i64, action: &str, payload: &Value) -> Resul
     validate_action(action)?;
     match action {
         "state" => serde_json::to_value(snapshot(app, project_id)?).map_err(|e| e.to_string()),
-        "grab" => serde_json::to_value(crate::label::frame_grab(app.clone(), project_id)?)
+        "grab" => serde_json::to_value(crate::label::frame_grab(app.clone(), project_id, None)?)
             .map_err(|e| e.to_string()),
         "label" => {
             let frame_id = payload

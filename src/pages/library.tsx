@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { FolderInput, ImageUp, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Boxes, FolderInput, FolderOpen, ImageUp, RefreshCw, Trash2 } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -14,43 +14,66 @@ import { Input } from "../components/ui/input";
 import { Separator } from "../components/ui/separator";
 import { Skeleton } from "../components/ui/skeleton";
 import { PageHeader } from "../components/page-header";
+import { useProject } from "../components/project-context";
+import { useSidebar } from "../components/sidebar-context";
 import {
+  cancelRoboflowImport,
+  deleteLabeledFrames,
+  frameFullImage,
+  frameImage,
   importFolder,
   importImages,
+  importRoboflowDataset,
   isDesktop,
   listFrames,
-  listProjects,
+  listFramesSince,
+  onRoboflowProgress,
+  pickFolder,
 } from "../lib/api";
 import { formatDate } from "../lib/utils";
-import type { FrameView, ImportReport, Project } from "../lib/types";
+import type {
+  FrameView,
+  ImportReport,
+  RoboflowProgress,
+  RoboflowReport,
+} from "../lib/types";
+
+function formatRemaining(seconds: number): string {
+  const rounded = Math.max(1, Math.round(seconds));
+  if (rounded < 60) return `${rounded}s`;
+  const minutes = Math.floor(rounded / 60);
+  if (minutes < 60) return `${minutes}m ${rounded % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
 
 export function LibraryPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const { projects, projectId, selectProject, refresh: refreshProjects } = useProject();
+  const { live } = useSidebar();
   const [frames, setFrames] = useState<FrameView[]>([]);
   const [selected, setSelected] = useState<FrameView | null>(null);
   const [paths, setPaths] = useState("");
   const [folder, setFolder] = useState("");
+  const [roboflowFolder, setRoboflowFolder] = useState("");
+  const [roboflowReport, setRoboflowReport] = useState<RoboflowReport | null>(null);
+  const [progress, setProgress] = useState<RoboflowProgress | null>(null);
   const [report, setReport] = useState<ImportReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmLabeled, setConfirmLabeled] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [frameLimit, setFrameLimit] = useState(400);
+  const projectIdRef = useRef<number | null>(null);
+  const lastSeenId = useRef(0);
+  const lastLiveRefresh = useRef(0);
+  const progressStart = useRef<{ at: number; processed: number } | null>(null);
 
   useEffect(() => {
-    let alive = true;
-    listProjects()
-      .then((rows) => {
-        if (!alive) return;
-        setProjects(rows);
-        setProjectId((current) => current ?? rows[0]?.id ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (alive) setError(String(reason));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
+    projectIdRef.current = projectId;
+    setConfirmLabeled(false);
+    setNotice(null);
+    setFrameLimit(400);
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId) {
@@ -61,10 +84,14 @@ export function LibraryPage() {
     }
     let alive = true;
     setLoading(true);
-    listFrames(projectId)
+    listFrames(projectId, frameLimit)
       .then((rows) => {
         if (!alive) return;
         setFrames(rows);
+        lastSeenId.current = rows.reduce(
+          (max, entry) => Math.max(max, entry.id),
+          0
+        );
         setSelected((current) => current ?? rows[0] ?? null);
       })
       .catch((reason: unknown) => {
@@ -76,12 +103,80 @@ export function LibraryPage() {
     return () => {
       alive = false;
     };
-  }, [projectId]);
+  }, [projectId, frameLimit]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    let alive = true;
+    let off: (() => void) | null = null;
+    void onRoboflowProgress((next) => {
+      if (!alive) return;
+      setProgress(next);
+      if (!progressStart.current) {
+        progressStart.current = { at: Date.now(), processed: next.processed };
+      }
+      // Only the frames that arrived since the last tick are fetched, so a
+      // running import never rebuilds every preview on each update.
+      const now = Date.now();
+      const id = projectIdRef.current;
+      if (id !== null && now - lastLiveRefresh.current > 1200) {
+        lastLiveRefresh.current = now;
+        void listFramesSince(id, lastSeenId.current, 100)
+          .then((rows) => {
+            if (!alive || rows.length === 0) return;
+            lastSeenId.current = rows.reduce(
+              (max, entry) => Math.max(max, entry.id),
+              lastSeenId.current
+            );
+            setFrames((current) => {
+              const known = new Set(current.map((entry) => entry.id));
+              return [...rows.filter((entry) => !known.has(entry.id)), ...current];
+            });
+          })
+          .catch(() => {});
+      }
+    }).then((cleanup) => {
+      if (alive) off = cleanup;
+      else cleanup();
+    });
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, []);
 
   async function refresh(id: number) {
-    const rows = await listFrames(id);
+    const rows = await listFrames(id, frameLimit);
     setFrames(rows);
+    lastSeenId.current = rows.reduce(
+      (max, entry) => Math.max(max, entry.id),
+      0
+    );
     return rows;
+  }
+
+  async function deleteLabeled() {
+    if (!projectId) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const count = await deleteLabeledFrames(projectId);
+      const rows = await refresh(projectId);
+      setSelected((current) =>
+        current && rows.some((row) => row.id === current.id) ? current : rows[0] ?? null
+      );
+      setNotice(
+        count === 0
+          ? "No labeled screenshots to delete."
+          : `Deleted ${count} labeled screenshot${count === 1 ? "" : "s"}. Saved example crops are unchanged.`
+      );
+      setConfirmLabeled(false);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function importPaths() {
@@ -125,24 +220,121 @@ export function LibraryPage() {
     }
   }
 
+  async function browseFolder(setter: (value: string) => void) {
+    try {
+      const picked = await pickFolder();
+      if (picked) setter(picked);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function importRoboflow() {
+    if (!projectId) return;
+    const target = roboflowFolder.trim();
+    if (!target) return;
+    setBusy(true);
+    setError(null);
+    setRoboflowReport(null);
+    setProgress(null);
+    lastSeenId.current = frames.reduce(
+      (max, entry) => Math.max(max, entry.id),
+      0
+    );
+    progressStart.current = null;
+    lastLiveRefresh.current = 0;
+    try {
+      const result = await importRoboflowDataset(projectId, target);
+      setRoboflowReport(result);
+      const rows = await refresh(projectId);
+      setSelected(rows[0] ?? null);
+      setRoboflowFolder("");
+      await refreshProjects();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      progressStart.current = null;
+      setProgress(null);
+      setBusy(false);
+    }
+  }
+
+  async function cancelRoboflow() {
+    try {
+      const stopped = await cancelRoboflowImport();
+      if (!stopped) setProgress(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  const elapsedSeconds = progressStart.current
+    ? (Date.now() - progressStart.current.at) / 1000
+    : 0;
+  const processedSinceStart = progress
+    ? progress.processed - (progressStart.current?.processed ?? 0)
+    : 0;
+  const imagesPerSecond = elapsedSeconds > 1 ? processedSinceStart / elapsedSeconds : 0;
+  const secondsLeft =
+    imagesPerSecond > 0 && progress
+      ? Math.max(0, progress.total - progress.processed) / imagesPerSecond
+      : 0;
+  const totalFrames =
+    projects.find((project) => project.id === projectId)?.frames ?? frames.length;
+  const labeledCount = frames.filter((frame) => frame.examples > 0).length;
+
   return (
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Library"
         description="Every frame the project can label, grabbed or imported. Imports are copied into the project folder."
         action={
-          <Button
-            size="sm"
-            variant="outline"
-            className="gap-1.5"
-            disabled={!projectId || busy}
-            onClick={() => {
-              if (projectId) void refresh(projectId);
-            }}
-          >
-            <RefreshCw className="size-4" aria-hidden="true" />
-            Refresh
-          </Button>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {confirmLabeled ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={busy || labeledCount === 0}
+                  onClick={() => void deleteLabeled()}
+                >
+                  Delete {labeledCount} screenshot{labeledCount === 1 ? "" : "s"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => setConfirmLabeled(false)}
+                >
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1.5"
+                title="Delete original screenshots that already have examples. The saved example crops stay."
+                disabled={!projectId || busy || labeledCount === 0}
+                onClick={() => setConfirmLabeled(true)}
+              >
+                <Trash2 className="size-4" aria-hidden="true" />
+                Delete labeled
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              disabled={!projectId || busy}
+              onClick={() => {
+                if (projectId) void refresh(projectId);
+              }}
+            >
+              <RefreshCw className="size-4" aria-hidden="true" />
+              Refresh
+            </Button>
+          </div>
         }
       />
 
@@ -158,6 +350,10 @@ export function LibraryPage() {
         </p>
       ) : null}
 
+      {notice ? (
+        <p className="border-b border-border p-2 text-xs text-muted-foreground">{notice}</p>
+      ) : null}
+
       <div className="flex flex-wrap items-center gap-2 border-b border-border p-2.5">
         <span className="text-xs text-muted-foreground">Project</span>
         {projects.length === 0 ? (
@@ -170,7 +366,8 @@ export function LibraryPage() {
               key={project.id}
               size="sm"
               variant={project.id === projectId ? "secondary" : "ghost"}
-              onClick={() => setProjectId(project.id)}
+              disabled={live}
+              onClick={() => selectProject(project.id)}
             >
               {project.name}
             </Button>
@@ -215,12 +412,25 @@ export function LibraryPage() {
               <label htmlFor="import-folder" className="text-xs text-muted-foreground">
                 Folder
               </label>
-              <Input
-                id="import-folder"
-                value={folder}
-                onChange={(event) => setFolder(event.target.value)}
-                placeholder="C:\\shots\\traffic"
-              />
+              <div className="flex gap-1.5">
+                <Input
+                  id="import-folder"
+                  value={folder}
+                  onChange={(event) => setFolder(event.target.value)}
+                  placeholder="C:\\shots\\traffic"
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 shrink-0 gap-1.5"
+                  disabled={!isDesktop || busy}
+                  title="Choose a folder of images"
+                  onClick={() => browseFolder(setFolder)}
+                >
+                  <FolderOpen className="size-4" aria-hidden="true" />
+                  Browse
+                </Button>
+              </div>
             </div>
             <Button
               size="sm"
@@ -233,10 +443,106 @@ export function LibraryPage() {
               Import a folder
             </Button>
 
+            <Separator />
+
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="roboflow-folder" className="text-xs text-muted-foreground">
+                Roboflow export folder
+              </label>
+              <div className="flex gap-1.5">
+                <Input
+                  id="roboflow-folder"
+                  value={roboflowFolder}
+                  onChange={(event) => setRoboflowFolder(event.target.value)}
+                  placeholder="C:\\datasets\\overwatch-2-3"
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 shrink-0 gap-1.5"
+                  disabled={!isDesktop || busy}
+                  title="Choose the folder holding data.yaml"
+                  onClick={() => browseFolder(setRoboflowFolder)}
+                >
+                  <FolderOpen className="size-4" aria-hidden="true" />
+                  Browse
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Download the dataset as YOLOv8 or YOLO26 TXT, unzip it, and point at the
+                folder holding data.yaml. Class names come from that file.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5 self-start"
+              disabled={!projectId || busy || roboflowFolder.trim().length === 0}
+              onClick={importRoboflow}
+            >
+              <Boxes className="size-4" aria-hidden="true" />
+              Import Roboflow dataset
+            </Button>
+
+            {progress ? (
+              <div className="flex flex-col gap-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {progress.processed} of {progress.total} images. {progress.frames} frames,{
+                    " "}
+                    {progress.examples} examples, {progress.skipped} skipped.
+                    {imagesPerSecond > 0 && progress.processed < progress.total
+                      ? ` ${imagesPerSecond.toFixed(1)} images/s, about ${formatRemaining(
+                          secondsLeft
+                        )} left.`
+                      : ""}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="ml-auto"
+                    onClick={cancelRoboflow}
+                  >
+                    Cancel import
+                  </Button>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label="Roboflow import progress"
+                  aria-valuemin={0}
+                  aria-valuemax={progress.total}
+                  aria-valuenow={progress.processed}
+                  className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+                >
+                  <div
+                    className="h-full bg-foreground transition-[width] duration-200"
+                    style={{
+                      width: `${
+                        progress.total === 0
+                          ? 0
+                          : Math.round((progress.processed / progress.total) * 100)
+                      }%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+
             {report ? (
               <p className="text-xs text-muted-foreground">
                 {report.imported} imported, {report.skipped} skipped.
                 {report.errors.length > 0 ? ` ${report.errors.join(". ")}` : ""}
+              </p>
+            ) : null}
+
+            {roboflowReport ? (
+              <p className="text-xs text-muted-foreground">
+                {roboflowReport.frames} frames, {roboflowReport.examples} examples,{" "}
+                {roboflowReport.classes} classes. {roboflowReport.skipped} skipped.
+                {roboflowReport.cancelled ? " Import cancelled." : ""}
+                {roboflowReport.errors.length > 0
+                  ? ` ${roboflowReport.errors.join(". ")}`
+                  : ""}
               </p>
             ) : null}
           </CardContent>
@@ -260,7 +566,7 @@ export function LibraryPage() {
             {selected ? (
               <div className="flex flex-col gap-2">
                 <img
-                  src={selected.preview}
+                  src={frameFullImage(selected)}
                   alt={`Frame ${selected.id}`}
                   className="w-full rounded-md border border-border"
                 />
@@ -281,12 +587,25 @@ export function LibraryPage() {
 
       <div className="px-2.5 pb-2.5">
         <Card>
-          <CardHeader>
-            <CardTitle>Frames</CardTitle>
-            <CardDescription>
-              {frames.length === 1 ? "1 frame" : `${frames.length} frames`} in this project.
-              Newest first.
-            </CardDescription>
+          <CardHeader className="flex flex-row items-start justify-between gap-2">
+            <div className="flex flex-col gap-1.5">
+              <CardTitle>Frames</CardTitle>
+              <CardDescription>
+                {frames.length === 1 ? "1 frame" : `${frames.length} frames`} shown
+                {totalFrames > frames.length ? ` of ${totalFrames}` : ""}. Newest
+                first.
+              </CardDescription>
+            </div>
+            {totalFrames > frames.length ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={loading}
+                onClick={() => setFrameLimit((current) => current + 400)}
+              >
+                Load older
+              </Button>
+            ) : null}
           </CardHeader>
           <CardContent>
             {loading ? (
@@ -310,7 +629,7 @@ export function LibraryPage() {
                       onClick={() => setSelected(frame)}
                     >
                       <img
-                        src={frame.preview}
+                        src={frameImage(frame)}
                         alt={`Frame ${frame.id}`}
                         loading="lazy"
                         decoding="async"

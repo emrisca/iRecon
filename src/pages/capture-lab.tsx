@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Download, Play, Square } from "lucide-react";
+import { Download, Play, RotateCcw, Square } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -12,13 +12,15 @@ import {
 } from "../components/ui/card";
 import { Skeleton } from "../components/ui/skeleton";
 import { PageHeader } from "../components/page-header";
+import { useProject } from "../components/project-context";
+import { useSidebar } from "../components/sidebar-context";
 import {
   downloadModel,
   getModelCatalog,
   getOverlayState,
+  getSetting,
   hideOverlay,
   isDesktop,
-  listProjects,
   listSources,
   loadModel,
   onDetections,
@@ -26,9 +28,11 @@ import {
   onModelProgress,
   onPaint,
   onStats,
+  overlaySmoothing,
   projectMatchFloor,
   setCalibration,
   setProjectMatchFloor,
+  setSetting,
   showOverlay,
   startCapture,
   stopCapture,
@@ -42,7 +46,6 @@ import type {
   ModelProgress,
   OverlayState,
   PaintStats,
-  Project,
   SourceView,
 } from "../lib/types";
 
@@ -75,11 +78,61 @@ export function CaptureLabPage({
   const [error, setError] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [progress, setProgress] = useState<ModelProgress | null>(null);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const { projects, projectId, selectProject } = useProject();
+  const { live } = useSidebar();
   const [sources, setSources] = useState<SourceView[]>([]);
   const [sourceId, setSourceId] = useState<number | null>(null);
   const [floor, setFloor] = useState(0);
+  const [harvestCap, setHarvestCap] = useState(40);
+  const [smoothMs, setSmoothMs] = useState(55);
+  const [exampleCap, setExampleCap] = useState(400);
+  const [settingsReady, setSettingsReady] = useState(!isDesktop);
+  const [sourcesReady, setSourcesReady] = useState(!isDesktop);
+  const [savedSourceId, setSavedSourceId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!isDesktop) {
+      setSettingsReady(true);
+      return;
+    }
+    let alive = true;
+    getSetting("capture.source")
+      .then((source) => {
+        if (!alive) return;
+        const sourceId = source ? Number(source) : null;
+        setSavedSourceId(Number.isFinite(sourceId) ? sourceId : null);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setSettingsReady(true);
+      });
+    overlaySmoothing()
+      .then((value) => {
+        if (alive && Number.isFinite(value)) setSmoothMs(Math.min(200, Math.max(0, Math.round(value))));
+      })
+      .catch(() => {});
+    getSetting("matcher.max_examples")
+      .then((value) => {
+        if (!alive || value === null || value.trim() === "") return;
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+          setExampleCap(Math.min(100000, Math.round(parsed)));
+        }
+      })
+      .catch(() => {});
+    getSetting("capture.harvest_cap")
+      .then((value) => {
+        if (!alive || value === null || value.trim() === "") return;
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) {
+          setHarvestCap(Math.min(400, Math.max(0, Math.round(parsed))));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -126,20 +179,6 @@ export function CaptureLabPage({
     };
   }, []);
 
-  useEffect(() => {
-    let alive = true;
-    listProjects()
-      .then((rows) => {
-        if (!alive) return;
-        setProjects(rows);
-        setProjectId((current) => current ?? rows[0]?.id ?? null);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
-
   // Saved sources are optional. Without one, capture reads the primary display,
   // which is what it did before sources could drive the live loop.
   useEffect(() => {
@@ -147,21 +186,37 @@ export function CaptureLabPage({
     if (projectId == null) {
       setSources([]);
       setSourceId(null);
+      setSourcesReady(true);
       return () => {
         alive = false;
       };
     }
+    setSourcesReady(false);
     listSources(projectId)
       .then((rows) => {
         if (!alive) return;
         setSources(rows);
-        setSourceId((current) => (rows.some((row) => row.id === current) ? current : null));
+        setSourceId((current) => {
+          if (current !== null && rows.some((row) => row.id === current)) return current;
+          if (savedSourceId !== null && rows.some((row) => row.id === savedSourceId)) {
+            return savedSourceId;
+          }
+          return null;
+        });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setSourcesReady(true);
+      });
     return () => {
       alive = false;
     };
-  }, [projectId]);
+  }, [projectId, savedSourceId]);
+
+  useEffect(() => {
+    if (!isDesktop || !settingsReady || !sourcesReady || projectId == null) return;
+    void setSetting("capture.source", sourceId === null ? "" : String(sourceId));
+  }, [projectId, settingsReady, sourceId, sourcesReady]);
 
   useEffect(() => {
     let alive = true;
@@ -258,6 +313,36 @@ export function CaptureLabPage({
     }
   }
 
+  async function changeSmoothing(value: number) {
+    const next = Math.min(200, Math.max(0, Math.round(value)));
+    setSmoothMs(next);
+    try {
+      await overlaySmoothing(next);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function changeExampleCap(value: number) {
+    const next = Math.min(100000, Math.max(0, Math.round(value)));
+    setExampleCap(next);
+    try {
+      await setSetting("matcher.max_examples", String(next));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function changeHarvestCap(value: number) {
+    const next = Math.min(400, Math.max(0, Math.round(value)));
+    setHarvestCap(next);
+    try {
+      await setSetting("capture.harvest_cap", String(next));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function changeFloor(percent: number) {
     const next = Math.min(100, Math.max(0, Math.round(percent)));
     setFloor(next / 100);
@@ -322,8 +407,8 @@ export function CaptureLabPage({
                     key={project.id}
                     size="sm"
                     variant={project.id === projectId ? "secondary" : "ghost"}
-                    disabled={running}
-                    onClick={() => setProjectId(project.id)}
+                    disabled={running || live}
+                    onClick={() => selectProject(project.id)}
                   >
                     {project.name}
                   </Button>
@@ -376,6 +461,72 @@ export function CaptureLabPage({
             Record session
           </label>
           <div className="ml-auto flex flex-wrap items-center gap-2">
+            <label htmlFor="box-smoothing" className="text-xs text-muted-foreground">
+              Box smoothing
+            </label>
+            <input
+              id="box-smoothing"
+              type="range"
+              min={0}
+              max={200}
+              step={5}
+              value={smoothMs}
+              onChange={(event) => void changeSmoothing(Number(event.target.value))}
+              className="w-28 accent-primary"
+              title="Milliseconds a box takes to reach its new position. Zero snaps."
+            />
+            <span className="text-sm tabular-nums">{smoothMs} ms</span>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-8 gap-1.5"
+              title="Back to the 55 ms default"
+              onClick={() => void changeSmoothing(55)}
+            >
+              <RotateCcw className="size-4" aria-hidden="true" />
+              Reset
+            </Button>
+            <label htmlFor="coverage-cap" className="text-xs text-muted-foreground">
+              Coverage cap
+            </label>
+            <input
+              id="coverage-cap"
+              type="number"
+              min={0}
+              max={400}
+              step={10}
+              value={harvestCap}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setHarvestCap(
+                  Number.isFinite(next) ? Math.min(400, Math.max(0, Math.round(next))) : 0
+                );
+              }}
+              onBlur={() => void changeHarvestCap(harvestCap)}
+              className="h-8 w-20 rounded-md border border-border bg-background px-2 text-sm tabular-nums"
+            />
+            <span className="text-xs text-muted-foreground">per run</span>
+            <label htmlFor="example-cap" className="text-xs text-muted-foreground">
+              Examples cap
+            </label>
+            <input
+              id="example-cap"
+              type="number"
+              min={0}
+              max={100000}
+              step={50}
+              value={exampleCap}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setExampleCap(
+                  Number.isFinite(next) ? Math.min(100000, Math.max(0, Math.round(next))) : 0
+                );
+              }}
+              onBlur={() => void changeExampleCap(exampleCap)}
+              className="h-8 w-24 rounded-md border border-border bg-background px-2 text-sm tabular-nums"
+              title="Embedded examples loaded per class and role. Zero uses every example."
+            />
+            <span className="text-xs text-muted-foreground">per role, 0 = all</span>
             <label htmlFor="match-floor" className="text-xs text-muted-foreground">
               Match floor
             </label>

@@ -7,14 +7,19 @@ use base64::Engine as _;
 use image::{ImageFormat, RgbaImage};
 use rusqlite::params;
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::matcher;
 use crate::AppState;
 
 const PREVIEW_WIDTH: u32 = 1280;
+const SETTING_PROJECT: &str = "label.project";
+const SETTING_SOURCE: &str = "label.source";
+const SETTING_SHORTCUT: &str = "label.grab_shortcut";
+const DEFAULT_GRAB_SHORTCUT: &str = "Ctrl+Alt+G";
 const PREVIEW_QUALITY: u8 = 70;
-const PALETTE: [&str; 8] = [
+pub(crate) const PALETTE: [&str; 8] = [
     "oklch(0.62 0.11 250)",
     "oklch(0.62 0.11 160)",
     "oklch(0.62 0.11 25)",
@@ -33,6 +38,9 @@ pub struct FrameView {
     pub width: u32,
     pub height: u32,
     pub preview: String,
+    /// Cached thumbnail file. The webview loads it through the asset protocol,
+    /// which keeps a frame list from carrying base64 for every row.
+    pub thumb_path: String,
     pub created_at: String,
     /// Number of saved examples on this frame, across every class.
     pub examples: i64,
@@ -50,6 +58,15 @@ pub struct ClassView {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CleanupReport {
+    pub removed_classes: usize,
+    pub removed_examples: usize,
+    pub merged_classes: usize,
+    pub moved_examples: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExampleView {
     pub id: i64,
     pub class_id: i64,
@@ -57,6 +74,8 @@ pub struct ExampleView {
     pub width: u32,
     pub height: u32,
     pub preview: String,
+    /// Crop file on disk, loaded through the asset protocol beside `path`.
+    pub thumb_path: String,
     pub bbox: String,
     pub role: String,
     pub created_at: String,
@@ -124,6 +143,11 @@ pub(crate) fn jpeg_bytes(image: &RgbaImage, target_width: u32, quality: u8) -> V
     buffer
 }
 
+/// Grid thumbnails stay small because the Label stage loads the original
+/// frame file; only listings use this size.
+pub(crate) const THUMB_WIDTH: u32 = 320;
+pub(crate) const THUMB_QUALITY: u8 = 70;
+
 pub(crate) fn preview(image: &RgbaImage) -> String {
     jpeg_data_url(&jpeg_bytes(image, PREVIEW_WIDTH, PREVIEW_QUALITY))
 }
@@ -154,6 +178,339 @@ pub(crate) fn project_folder(
     Ok((slug, root))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrabSettings {
+    pub shortcut: Option<String>,
+    pub project_id: Option<i64>,
+    pub source_id: Option<i64>,
+}
+
+fn read_setting(app: &AppHandle, key: &str) -> Option<String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().ok()?;
+    conn.query_row(
+        "select value from setting where key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn write_setting(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "insert into setting (key, value) values (?1, ?2)
+         on conflict(key) do update set value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn grab_settings(app: AppHandle) -> Result<GrabSettings, String> {
+    let shortcut = match read_setting(&app, SETTING_SHORTCUT) {
+        Some(value) if value.trim().eq_ignore_ascii_case("none") => None,
+        Some(value) if value.trim().is_empty() => Some(DEFAULT_GRAB_SHORTCUT.to_string()),
+        Some(value) => Some(value),
+        None => Some(DEFAULT_GRAB_SHORTCUT.to_string()),
+    };
+    let project = read_setting(&app, SETTING_PROJECT).and_then(|value| value.parse::<i64>().ok());
+    let source = read_setting(&app, SETTING_SOURCE).and_then(|value| value.parse::<i64>().ok());
+
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let project_id = project.filter(|id| {
+        conn.query_row("select 1 from project where id = ?1", params![id], |_| Ok(()))
+            .is_ok()
+    });
+    let source_id = match (project_id, source) {
+        (Some(project_id), Some(source_id)) if conn
+            .query_row(
+                "select 1 from source where id = ?1 and project_id = ?2",
+                params![source_id, project_id],
+                |_| Ok(()),
+            )
+            .is_ok() =>
+        {
+            Some(source_id)
+        }
+        _ => None,
+    };
+
+    Ok(GrabSettings {
+        shortcut,
+        project_id,
+        source_id,
+    })
+}
+
+#[tauri::command]
+pub fn grab_target_set(
+    app: AppHandle,
+    project_id: i64,
+    source_id: Option<i64>,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "select 1 from project where id = ?1",
+        params![project_id],
+        |_| Ok(()),
+    )
+    .map_err(|_| "That project no longer exists".to_string())?;
+    if let Some(source_id) = source_id {
+        conn.query_row(
+            "select 1 from source where id = ?1 and project_id = ?2",
+            params![source_id, project_id],
+            |_| Ok(()),
+        )
+        .map_err(|_| "That source belongs to another project".to_string())?;
+    }
+    drop(conn);
+
+    write_setting(&app, SETTING_PROJECT, &project_id.to_string())?;
+    write_setting(
+        &app,
+        SETTING_SOURCE,
+        &source_id.map(|id| id.to_string()).unwrap_or_default(),
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn grab_shortcut_set(app: AppHandle, shortcut: Option<String>) -> Result<(), String> {
+    let shortcut = shortcut
+        .map(|value| normalize_global_shortcut(&value))
+        .filter(|value| !value.is_empty());
+    register_grab_shortcut(&app, shortcut.as_deref())?;
+    write_setting(
+        &app,
+        SETTING_SHORTCUT,
+        shortcut.as_deref().unwrap_or("none"),
+    )?;
+    Ok(())
+}
+
+/// A bare letter registered with the desktop would be swallowed in every app,
+/// so single keys become Ctrl+Alt+key. Function keys are safe on their own.
+fn normalize_global_shortcut(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.contains('+') || is_function_key(trimmed) {
+        trimmed.to_string()
+    } else {
+        format!("Ctrl+Alt+{trimmed}")
+    }
+}
+
+fn is_function_key(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_uppercase().as_str(),
+        "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
+    )
+}
+
+fn parse_shortcut(value: &str) -> Option<(Option<Modifiers>, Code)> {
+    let mut parts: Vec<&str> = value
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let key = parts.pop()?;
+    let mut modifiers = Modifiers::empty();
+    for part in parts {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
+            "alt" | "option" => modifiers |= Modifiers::ALT,
+            "shift" => modifiers |= Modifiers::SHIFT,
+            "meta" | "super" | "cmd" | "command" => modifiers |= Modifiers::META,
+            _ => return None,
+        }
+    }
+    let code = key_code(key)?;
+    Some((if modifiers.is_empty() { None } else { Some(modifiers) }, code))
+}
+
+/// Registers the grab shortcut with the desktop, so it still fires when iRecon
+/// is behind another window. `None` removes the global binding.
+pub(crate) fn register_grab_shortcut(
+    app: &AppHandle,
+    shortcut: Option<&str>,
+) -> Result<(), String> {
+    let label = shortcut
+        .map(normalize_global_shortcut)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let parsed = if label.is_empty() {
+        None
+    } else {
+        let (modifiers, code) = parse_shortcut(&label)
+            .ok_or_else(|| format!("{label} cannot be used as a global shortcut"))?;
+        Some(Shortcut::new(modifiers, code))
+    };
+
+    let state = app.state::<AppState>();
+    let mut current = state.grab_shortcut.lock().map_err(|e| e.to_string())?;
+    if current
+        .as_ref()
+        .map(|(saved, _)| saved.as_str())
+        .unwrap_or_default()
+        == label
+    {
+        return Ok(());
+    }
+    if let Some((_, old)) = current.take() {
+        let _ = app.global_shortcut().unregister(old);
+    }
+
+    let Some(shortcut) = parsed else {
+        return Ok(());
+    };
+    app.global_shortcut()
+        .on_shortcut(shortcut.clone(), move |app, _shortcut, event| {
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            let handle = app.clone();
+            std::thread::spawn(move || match grab_from_settings(&handle) {
+                Ok(frame) => {
+                    let _ = handle.emit("spike:frame-grabbed", frame);
+                }
+                Err(error) => {
+                    let _ = handle.emit("spike:grab-error", error);
+                }
+            });
+        })
+        .map_err(|error| format!("Could not register {label}: {error}"))?;
+    *current = Some((label, shortcut));
+    Ok(())
+}
+
+pub(crate) fn register_saved_grab_shortcut(app: &AppHandle) {
+    let saved = match read_setting(app, SETTING_SHORTCUT) {
+        Some(value) if value.trim().eq_ignore_ascii_case("none") => return,
+        Some(value) if value.trim().is_empty() => {
+            let _ = write_setting(app, SETTING_SHORTCUT, DEFAULT_GRAB_SHORTCUT);
+            DEFAULT_GRAB_SHORTCUT.to_string()
+        }
+        Some(value) => value,
+        None => {
+            let _ = write_setting(app, SETTING_SHORTCUT, DEFAULT_GRAB_SHORTCUT);
+            DEFAULT_GRAB_SHORTCUT.to_string()
+        }
+    };
+    let shortcut = normalize_global_shortcut(&saved);
+    if shortcut != saved {
+        let _ = write_setting(app, SETTING_SHORTCUT, &shortcut);
+    }
+    if let Err(error) = register_grab_shortcut(app, Some(&shortcut)) {
+        eprintln!("iRecon could not register the saved grab shortcut {shortcut}: {error}");
+    }
+}
+
+fn grab_from_settings(app: &AppHandle) -> Result<FrameView, String> {
+    let settings = grab_settings(app.clone())?;
+    let project_id = settings.project_id.ok_or_else(|| {
+        "Choose a project on the Label page before using the global grab shortcut".to_string()
+    })?;
+    frame_grab(app.clone(), project_id, settings.source_id)
+}
+
+fn key_code(label: &str) -> Option<Code> {
+    let upper = label.trim().to_ascii_uppercase();
+    match upper.as_str() {
+        "SPACE" => return Some(Code::Space),
+        "ARROWUP" | "UP" => return Some(Code::ArrowUp),
+        "ARROWDOWN" | "DOWN" => return Some(Code::ArrowDown),
+        "ARROWLEFT" | "LEFT" => return Some(Code::ArrowLeft),
+        "ARROWRIGHT" | "RIGHT" => return Some(Code::ArrowRight),
+        "ENTER" | "RETURN" => return Some(Code::Enter),
+        "TAB" => return Some(Code::Tab),
+        "BACKSPACE" => return Some(Code::Backspace),
+        "DELETE" => return Some(Code::Delete),
+        "INSERT" => return Some(Code::Insert),
+        "HOME" => return Some(Code::Home),
+        "END" => return Some(Code::End),
+        "PAGEUP" => return Some(Code::PageUp),
+        "PAGEDOWN" => return Some(Code::PageDown),
+        "ESCAPE" => return Some(Code::Escape),
+        "F1" => return Some(Code::F1),
+        "F2" => return Some(Code::F2),
+        "F3" => return Some(Code::F3),
+        "F4" => return Some(Code::F4),
+        "F5" => return Some(Code::F5),
+        "F6" => return Some(Code::F6),
+        "F7" => return Some(Code::F7),
+        "F8" => return Some(Code::F8),
+        "F9" => return Some(Code::F9),
+        "F10" => return Some(Code::F10),
+        "F11" => return Some(Code::F11),
+        "F12" => return Some(Code::F12),
+        _ => {}
+    }
+
+    let mut chars = upper.chars();
+    let character = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(match character {
+        'A' => Code::KeyA,
+        'B' => Code::KeyB,
+        'C' => Code::KeyC,
+        'D' => Code::KeyD,
+        'E' => Code::KeyE,
+        'F' => Code::KeyF,
+        'G' => Code::KeyG,
+        'H' => Code::KeyH,
+        'I' => Code::KeyI,
+        'J' => Code::KeyJ,
+        'K' => Code::KeyK,
+        'L' => Code::KeyL,
+        'M' => Code::KeyM,
+        'N' => Code::KeyN,
+        'O' => Code::KeyO,
+        'P' => Code::KeyP,
+        'Q' => Code::KeyQ,
+        'R' => Code::KeyR,
+        'S' => Code::KeyS,
+        'T' => Code::KeyT,
+        'U' => Code::KeyU,
+        'V' => Code::KeyV,
+        'W' => Code::KeyW,
+        'X' => Code::KeyX,
+        'Y' => Code::KeyY,
+        'Z' => Code::KeyZ,
+        '0' => Code::Digit0,
+        '1' => Code::Digit1,
+        '2' => Code::Digit2,
+        '3' => Code::Digit3,
+        '4' => Code::Digit4,
+        '5' => Code::Digit5,
+        '6' => Code::Digit6,
+        '7' => Code::Digit7,
+        '8' => Code::Digit8,
+        '9' => Code::Digit9,
+        '-' => Code::Minus,
+        '=' => Code::Equal,
+        '[' => Code::BracketLeft,
+        ']' => Code::BracketRight,
+        ';' => Code::Semicolon,
+        '\'' => Code::Quote,
+        ',' => Code::Comma,
+        '.' => Code::Period,
+        '/' => Code::Slash,
+        '\\' => Code::Backslash,
+        '`' => Code::Backquote,
+        _ => return None,
+    })
+}
+
 fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;
@@ -177,9 +534,26 @@ fn slugify(name: &str) -> String {
 }
 
 #[tauri::command]
-pub fn frame_grab(app: AppHandle, project_id: i64) -> Result<FrameView, String> {
+pub fn frame_grab(
+    app: AppHandle,
+    project_id: i64,
+    source_id: Option<i64>,
+) -> Result<FrameView, String> {
     let (_slug, folder) = project_folder(&app, project_id)?;
-    let image = crate::grab::grab(&app)?;
+    let image = match source_id {
+        Some(id) => {
+            let source = crate::source::source_row(&app, id)?;
+            if source.project_id != project_id {
+                return Err("That source belongs to another project".into());
+            }
+            if source.kind == "display" {
+                crate::grab::grab_display(&app, &source.target)?
+            } else {
+                crate::source::load_frame(&source)?
+            }
+        }
+        None => crate::grab::grab(&app)?,
+    };
 
     let stamp = now_millis();
     let path = folder.join("frames").join(format!("{stamp}.png"));
@@ -214,6 +588,7 @@ pub fn frame_grab(app: AppHandle, project_id: i64) -> Result<FrameView, String> 
         width: image.width(),
         height: image.height(),
         preview: preview(&image),
+        thumb_path: String::new(),
         created_at,
         examples: 0,
     })
@@ -449,6 +824,177 @@ pub fn class_delete(app: AppHandle, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// A name made only of punctuation or whitespace is an export placeholder, not
+/// a real class. Matching is case and whitespace insensitive for duplicates.
+fn class_key(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+#[tauri::command]
+pub fn classes_cleanup(app: AppHandle, project_id: i64) -> Result<CleanupReport, String> {
+    let state = app.state::<AppState>();
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut statement = tx
+        .prepare("select id, name from class where project_id = ?1 order by id")
+        .map_err(|e| e.to_string())?;
+    let classes = statement
+        .query_map(params![project_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    drop(statement);
+
+    let mut report = CleanupReport {
+        removed_classes: 0,
+        removed_examples: 0,
+        merged_classes: 0,
+        moved_examples: 0,
+    };
+    let mut placeholder_folders = Vec::new();
+    for (id, name) in &classes {
+        if name.chars().any(|ch| ch.is_alphanumeric()) {
+            continue;
+        }
+        report.removed_examples += tx
+            .execute("delete from example where class_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("delete from candidate where class_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("delete from frame_truth where class_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("delete from class where id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        report.removed_classes += 1;
+        placeholder_folders.push(name.clone());
+    }
+
+    let mut groups: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for (id, name) in classes {
+        if !name.chars().any(|ch| ch.is_alphanumeric()) {
+            continue;
+        }
+        groups.entry(class_key(&name)).or_default().push((id, name));
+    }
+    for members in groups.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let mut ranked = Vec::with_capacity(members.len());
+        for (id, name) in members {
+            let count: i64 = tx
+                .query_row(
+                    "select count(*) from example where class_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            ranked.push((count, *id, name.clone()));
+        }
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let target = ranked[0].1;
+        for (_, source, _) in ranked.iter().skip(1) {
+            report.moved_examples += tx
+                .execute(
+                    "update example set class_id = ?1 where class_id = ?2",
+                    params![target, source],
+                )
+                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "update candidate set class_id = ?1 where class_id = ?2",
+                params![target, source],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "insert or ignore into frame_truth (frame_id, class_id)
+                 select frame_id, ?1 from frame_truth where class_id = ?2",
+                params![target, source],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute("delete from frame_truth where class_id = ?1", params![source])
+                .map_err(|e| e.to_string())?;
+            tx.execute("delete from class where id = ?1", params![source])
+                .map_err(|e| e.to_string())?;
+            report.merged_classes += 1;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    drop(conn);
+
+    if let Ok((_slug, root)) = project_folder(&app, project_id) {
+        for name in placeholder_folders {
+            let directory = root.join("examples").join(slugify(&name));
+            if directory.exists() {
+                let _ = std::fs::remove_dir_all(directory);
+            }
+        }
+    }
+    Ok(report)
+}
+
+#[tauri::command]
+pub fn classes_merge(
+    app: AppHandle,
+    source_id: i64,
+    target_id: i64,
+) -> Result<ClassView, String> {
+    if source_id == target_id {
+        return Err("Pick a different class to merge into".into());
+    }
+    let state = app.state::<AppState>();
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let source_project: i64 = tx
+        .query_row(
+            "select project_id from class where id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "That class no longer exists".to_string())?;
+    let target_project: i64 = tx
+        .query_row(
+            "select project_id from class where id = ?1",
+            params![target_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "That class no longer exists".to_string())?;
+    if source_project != target_project {
+        return Err("Those classes are in different projects".into());
+    }
+
+    tx.execute(
+        "update example set class_id = ?1 where class_id = ?2",
+        params![target_id, source_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "update candidate set class_id = ?1 where class_id = ?2",
+        params![target_id, source_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "insert or ignore into frame_truth (frame_id, class_id)
+         select frame_id, ?1 from frame_truth where class_id = ?2",
+        params![target_id, source_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "delete from frame_truth where class_id = ?1",
+        params![source_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute("delete from class where id = ?1", params![source_id])
+        .map_err(|e| e.to_string())?;
+    let target = read_class(&tx, target_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(target)
+}
+
 #[tauri::command]
 pub fn example_create(
     app: AppHandle,
@@ -547,7 +1093,8 @@ pub fn example_create(
         path: path.to_string_lossy().to_string(),
         width: crop.width(),
         height: crop.height(),
-        preview: png_data_url(&crop),
+        preview: String::new(),
+        thumb_path: path.to_string_lossy().to_string(),
         bbox,
         role,
         created_at,
@@ -555,17 +1102,24 @@ pub fn example_create(
 }
 
 #[tauri::command]
-pub fn examples_list(app: AppHandle, class_id: i64) -> Result<Vec<ExampleView>, String> {
+pub fn examples_list(
+    app: AppHandle,
+    class_id: i64,
+    before_id: Option<i64>,
+    limit: Option<u32>,
+) -> Result<Vec<ExampleView>, String> {
+    let limit = i64::from(limit.unwrap_or(400).min(400));
+    let before = before_id.unwrap_or(i64::MAX);
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let mut statement = conn
         .prepare(
             "select id, class_id, path, coalesce(bbox, ''), role, created_at
-             from example where class_id = ?1 order by id desc",
+             from example where class_id = ?1 and id < ?2 order by id desc limit ?3",
         )
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map(params![class_id], |row| {
+        .query_map(params![class_id, before, limit], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -580,26 +1134,44 @@ pub fn examples_list(app: AppHandle, class_id: i64) -> Result<Vec<ExampleView>, 
     let mut examples = Vec::new();
     for row in rows {
         let (id, class_id, path, bbox, role, created_at) = row.map_err(|e| e.to_string())?;
-        let (width, height, preview) = match image::open(&path) {
-            Ok(image) => {
-                let image = image.to_rgba8();
-                (image.width(), image.height(), png_data_url(&image))
-            }
-            Err(_) => (0, 0, String::new()),
-        };
+        // Only the header is read. The webview loads the crop itself, so a class
+        // with thousands of examples no longer base64s every PNG here.
+        let (width, height) = image::image_dimensions(&path).unwrap_or((0, 0));
         examples.push(ExampleView {
             id,
             class_id,
-            path,
+            path: path.clone(),
             width,
             height,
-            preview,
+            preview: String::new(),
+            thumb_path: path,
             bbox,
             role,
             created_at,
         });
     }
     Ok(examples)
+}
+
+#[tauri::command]
+pub fn example_delete(app: AppHandle, id: i64) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let path: Option<String> = conn
+        .query_row("select path from example where id = ?1", params![id], |row| {
+            row.get(0)
+        })
+        .ok();
+    let Some(path) = path else {
+        return Ok(());
+    };
+    conn.execute("delete from example where id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    drop(conn);
+    if !path.is_empty() {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
 }
 
 /// Ranks the project's classes against one box in a stored frame.

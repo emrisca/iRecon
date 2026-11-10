@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { AppSidebar, type Section } from "./components/app-sidebar";
+import { ProjectProvider, useProject } from "./components/project-context";
 import { SidebarContext } from "./components/sidebar-context";
 import {
+  getSetting,
   hideOverlay,
   isDesktop,
+  listSources,
+  setSetting,
   showOverlay,
   startCapture,
   stopCapture,
 } from "./lib/api";
 import { useTheme } from "./hooks/use-theme";
+import type { SourceView } from "./lib/types";
 import { CaptureLabPage } from "./pages/capture-lab";
-import { HomePage } from "./pages/home";
 import { DetectorsPage } from "./pages/detectors";
 import { EvalPage } from "./pages/eval";
 import { LabelPage } from "./pages/label";
@@ -21,8 +25,36 @@ import { ReviewPage } from "./pages/review";
 import { SessionsPage } from "./pages/sessions";
 import { SourcesPage } from "./pages/sources";
 
+const SECTIONS: Section[] = [
+  "projects",
+  "sources",
+  "library",
+  "review",
+  "label",
+  "capture",
+  "sessions",
+  "detectors",
+  "eval",
+];
+
+/// The last section survives a restart. A stored value from an older build that
+/// no longer exists falls back to Projects rather than an empty shell.
+function savedSection(): Section {
+  if (typeof window === "undefined") return "projects";
+  const stored = window.localStorage.getItem("irecon.section");
+  return SECTIONS.includes(stored as Section) ? (stored as Section) : "projects";
+}
+
 export default function App() {
-  const [section, setSection] = useState<Section>("home");
+  return (
+    <ProjectProvider>
+      <AppShell />
+    </ProjectProvider>
+  );
+}
+
+function AppShell() {
+  const [section, setSection] = useState<Section>(savedSection);
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     if (typeof window === "undefined") return true;
     return window.localStorage.getItem("irecon.sidebar") !== "closed";
@@ -30,6 +62,10 @@ export default function App() {
   const [live, setLive] = useState(false);
   const [liveBusy, setLiveBusy] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [liveSourceId, setLiveSourceId] = useState<number | null>(null);
+  const [liveSource, setLiveSource] = useState("Primary display");
+  const [liveSources, setLiveSources] = useState<SourceView[]>([]);
+  const { projects, projectId, project, selectProject } = useProject();
   const { theme, toggle } = useTheme();
 
   const toggleSidebar = useCallback(() => {
@@ -39,6 +75,10 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem("irecon.sidebar", sidebarOpen ? "open" : "closed");
   }, [sidebarOpen]);
+
+  useEffect(() => {
+    window.localStorage.setItem("irecon.section", section);
+  }, [section]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -58,6 +98,44 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [toggleSidebar]);
 
+  // The working project is shared by every page. Only the live source belongs
+  // to this shell, because it is a capture detail rather than project state.
+  useEffect(() => {
+    let alive = true;
+    if (projectId === null) {
+      setLiveSources([]);
+      setLiveSourceId(null);
+      setLiveSource("Primary display");
+      return () => {
+        alive = false;
+      };
+    }
+    Promise.all([
+      getSetting("capture.source"),
+      listSources(projectId).catch(() => []),
+    ])
+      .then(([savedSource, sources]) => {
+        if (!alive) return;
+        setLiveSources(sources);
+        const sourceId = savedSource ? Number(savedSource) : null;
+        const source = sources.find((entry) => entry.id === sourceId) ?? null;
+        setLiveSourceId(source?.id ?? null);
+        setLiveSource(source?.label ?? "Primary display");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [projectId]);
+
+  /** The picker writes the same setting Capture lab reads. */
+  async function selectLiveSource(id: number | null) {
+    const source = liveSources.find((entry) => entry.id === id) ?? null;
+    setLiveSourceId(source?.id ?? null);
+    setLiveSource(source?.label ?? "Primary display");
+    await setSetting("capture.source", source ? String(source.id) : "");
+  }
+
   async function toggleLive() {
     setLiveBusy(true);
     setLiveError(null);
@@ -67,7 +145,7 @@ export default function App() {
         await stopCapture();
         setLive(false);
       } else {
-        await startCapture();
+        await startCapture(projectId ?? undefined, false, liveSourceId);
         await showOverlay();
         setLive(true);
       }
@@ -85,6 +163,7 @@ export default function App() {
         toggle: toggleSidebar,
         live,
         liveBusy,
+        liveProject: project?.name ?? null,
         onToggleLive: toggleLive,
       }}
     >
@@ -97,6 +176,14 @@ export default function App() {
             onToggleTheme={toggle}
             live={live}
             liveBusy={liveBusy}
+            liveProject={project?.name ?? null}
+            liveSource={liveSource}
+            projects={projects}
+            projectId={projectId}
+            sources={liveSources}
+            liveSourceId={liveSourceId}
+            onSelectProject={selectProject}
+            onSelectLiveSource={selectLiveSource}
             onToggleLive={toggleLive}
           />
         ) : null}
@@ -115,7 +202,6 @@ export default function App() {
             </div>
           ) : null}
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {section === "home" ? <HomePage onSelect={setSection} /> : null}
             {section === "projects" ? <ProjectsPage /> : null}
             {section === "sources" ? <SourcesPage /> : null}
             {section === "library" ? <LibraryPage /> : null}

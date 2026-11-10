@@ -12,6 +12,8 @@ import {
   CardTitle,
 } from "../components/ui/card";
 import { PageHeader } from "../components/page-header";
+import { useProject } from "../components/project-context";
+import { useSidebar } from "../components/sidebar-context";
 import { Skeleton } from "../components/ui/skeleton";
 import {
   activateProjectDetector,
@@ -21,20 +23,18 @@ import {
   importProjectDetector,
   isDesktop,
   listProjectDetectors,
-  listProjects,
   listSessions,
 } from "../lib/api";
 import { formatDate } from "../lib/utils";
 import type {
   DetectorComparison,
-  Project,
   ProjectDetector,
   SessionView,
 } from "../lib/types";
 
 export function DetectorsPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const { projects, projectId, selectProject } = useProject();
+  const { live } = useSidebar();
   const [detectors, setDetectors] = useState<ProjectDetector[]>([]);
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [detectorId, setDetectorId] = useState<number | null>(null);
@@ -45,22 +45,6 @@ export function DetectorsPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    listProjects()
-      .then((rows) => {
-        if (!alive) return;
-        setProjects(rows);
-        setProjectId((current) => current ?? rows[0]?.id ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (alive) setError(String(reason));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
 
   useEffect(() => {
     if (!projectId) {
@@ -194,7 +178,8 @@ export function DetectorsPage() {
               key={project.id}
               size="sm"
               variant={project.id === projectId ? "secondary" : "ghost"}
-              onClick={() => setProjectId(project.id)}
+              disabled={live}
+              onClick={() => selectProject(project.id)}
             >
               {project.name}
             </Button>

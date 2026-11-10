@@ -24,14 +24,17 @@ import { Separator } from "../components/ui/separator";
 import { Skeleton } from "../components/ui/skeleton";
 import { FrameStage } from "../components/frame-stage";
 import { PageHeader } from "../components/page-header";
+import { useProject } from "../components/project-context";
+import { useSidebar } from "../components/sidebar-context";
 import {
   addSource,
   deleteSource,
   isDesktop,
   listDisplays,
-  listProjects,
   listSources,
   listWindows,
+  pickFolder,
+  pickImageFile,
   previewSource,
   setSourceCrop,
 } from "../lib/api";
@@ -40,7 +43,6 @@ import type {
   CaptureTarget,
   FramePayload,
   FrameView,
-  Project,
   SourceKind,
   SourceView,
 } from "../lib/types";
@@ -60,8 +62,8 @@ const KIND_NAMES: Record<SourceKind, string> = {
 };
 
 export function SourcesPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const { projects, projectId, selectProject } = useProject();
+  const { live } = useSidebar();
   const [sources, setSources] = useState<SourceView[]>([]);
   const [kind, setKind] = useState<SourceKind>("display");
   const [targets, setTargets] = useState<CaptureTarget[]>([]);
@@ -73,22 +75,6 @@ export function SourcesPage() {
   const [box, setBox] = useState<Box | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    listProjects()
-      .then((rows) => {
-        if (!alive) return;
-        setProjects(rows);
-        setProjectId((current) => current ?? rows[0]?.id ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (alive) setError(String(reason));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
 
   useEffect(() => {
     if (!projectId) {
@@ -159,6 +145,15 @@ export function SourcesPage() {
       setError(String(reason));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function browse() {
+    try {
+      const picked = kind === "folder" ? await pickFolder() : await pickImageFile();
+      if (picked) setPath(picked);
+    } catch (reason) {
+      setError(String(reason));
     }
   }
 
@@ -294,7 +289,8 @@ export function SourcesPage() {
               key={project.id}
               size="sm"
               variant={project.id === projectId ? "secondary" : "ghost"}
-              onClick={() => setProjectId(project.id)}
+              disabled={live}
+              onClick={() => selectProject(project.id)}
             >
               {project.name}
             </Button>
@@ -359,12 +355,29 @@ export function SourcesPage() {
                 <label htmlFor="source-path" className="text-xs text-muted-foreground">
                   {kind === "folder" ? "Folder path" : "Image path"}
                 </label>
-                <Input
-                  id="source-path"
-                  value={path}
-                  onChange={(event) => setPath(event.target.value)}
-                  placeholder={kind === "folder" ? "C:\\shots\\traffic" : "C:\\shots\\frame.png"}
-                />
+                <div className="flex gap-1.5">
+                  <Input
+                    id="source-path"
+                    value={path}
+                    onChange={(event) => setPath(event.target.value)}
+                    placeholder={
+                      kind === "folder" ? "C:\\shots\\traffic" : "C:\\shots\\frame.png"
+                    }
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-9 shrink-0 gap-1.5"
+                    disabled={!isDesktop || busy}
+                    title={
+                      kind === "folder" ? "Choose a folder of images" : "Choose an image file"
+                    }
+                    onClick={browse}
+                  >
+                    <FolderOpen className="size-4" aria-hidden="true" />
+                    Browse
+                  </Button>
+                </div>
               </div>
             )}
 

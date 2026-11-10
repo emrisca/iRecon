@@ -5,7 +5,6 @@ import {
   Film,
   FolderKanban,
   Gauge,
-  Home,
   Images,
   ListChecks,
   ScanLine,
@@ -19,6 +18,7 @@ import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 import { SettingsMenu } from "./settings-menu";
 import { cn } from "../lib/utils";
+import type { Project, SourceView } from "../lib/types";
 
 export type Section =
   | "projects"
@@ -29,12 +29,9 @@ export type Section =
   | "capture"
   | "sessions"
   | "detectors"
-  | "eval"
-  | "home";
+  | "eval";
 
 type Item = { id: Section; label: string; icon: LucideIcon };
-
-const start: Item = { id: "home", label: "Start here", icon: Home };
 
 const groups: Array<{ label: string; items: Item[] }> = [
   {
@@ -70,6 +67,14 @@ type SidebarProps = {
   onToggleTheme: () => void;
   live: boolean;
   liveBusy: boolean;
+  liveProject: string | null;
+  liveSource: string;
+  projects: Project[];
+  projectId: number | null;
+  sources: SourceView[];
+  liveSourceId: number | null;
+  onSelectProject: (id: number) => void;
+  onSelectLiveSource: (id: number | null) => void;
   onToggleLive: () => void;
 };
 
@@ -104,6 +109,14 @@ export function AppSidebar({
   onToggleTheme,
   live,
   liveBusy,
+  liveProject,
+  liveSource,
+  projects,
+  projectId,
+  sources,
+  liveSourceId,
+  onSelectProject,
+  onSelectLiveSource,
   onToggleLive,
 }: SidebarProps) {
   return (
@@ -121,12 +134,35 @@ export function AppSidebar({
 
       <Separator />
 
+      <div className="flex flex-col gap-1.5 border-b border-border p-2">
+        <label htmlFor="working-project" className="text-xs text-muted-foreground">
+          Project
+        </label>
+        <select
+          id="working-project"
+          className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          value={projectId ?? ""}
+          disabled={live || liveBusy || projects.length === 0}
+          title={
+            live
+              ? "Stop Live view to change the working project"
+              : "The project every page works in"
+          }
+          onChange={(event) => onSelectProject(Number(event.target.value))}
+        >
+          {projects.length === 0 ? <option value="">No project yet</option> : null}
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <nav
         className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-2"
         aria-label="Sections"
       >
-        <NavRow item={start} active={section === start.id} onSelect={onSelect} />
-
         {groups.map((group) => (
           <div key={group.label} className="flex flex-col gap-1.5">
             <p className="px-2 text-xs text-muted-foreground">{group.label}</p>
@@ -149,6 +185,11 @@ export function AppSidebar({
           className="w-full justify-start gap-2"
           disabled={liveBusy}
           aria-pressed={live}
+          title={
+            liveProject
+              ? `Live capture uses ${liveProject} from ${liveSource}. Change the source below.`
+              : "Live capture has no project to match against"
+          }
           onClick={onToggleLive}
         >
           <Eye className="size-5" aria-hidden="true" />
@@ -157,6 +198,34 @@ export function AppSidebar({
             {live ? "on" : "off"}
           </Badge>
         </Button>
+        <div className="flex flex-col gap-1.5 rounded-md border border-border p-2">
+          <label htmlFor="live-source" className="text-xs text-muted-foreground">
+            Live source
+          </label>
+          <select
+            id="live-source"
+            className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            value={liveSourceId ?? ""}
+            disabled={live || liveBusy || projectId === null}
+            title={
+              live
+                ? "Stop Live view to change the source"
+                : "The display, window, file or folder Live view captures"
+            }
+            onChange={(event) =>
+              onSelectLiveSource(
+                event.target.value === "" ? null : Number(event.target.value)
+              )
+            }
+          >
+            <option value="">Primary display</option>
+            {sources.map((source) => (
+              <option key={source.id} value={source.id}>
+                {source.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <SettingsMenu theme={theme} onToggleTheme={onToggleTheme} />
       </div>
     </aside>

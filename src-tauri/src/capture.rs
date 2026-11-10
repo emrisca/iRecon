@@ -47,6 +47,11 @@ const PREVIEW_WIDTH: u32 = 640;
 /// How long the inference thread waits before looking at the slot again. Two
 /// milliseconds is under a frame at 240 Hz and costs nothing while idle.
 const IDLE_POLL: Duration = Duration::from_millis(2);
+/// A live frame older than this is left in the slot so the producer can replace
+/// it, rather than starting a box on a frame that is already most of a display
+/// period old. The fallback keeps slow still and sequence sources moving.
+const FRAME_FRESHNESS: Duration = Duration::from_millis(8);
+const STALE_FALLBACK: Duration = Duration::from_millis(250);
 const POOL_RELOAD: Duration = Duration::from_secs(2);
 /// Replay runs on a fixed clock. Twenty frames a second is the Phase 2 exit
 /// rate, so a replay is comparable to a live run rather than a stress test.
@@ -60,14 +65,43 @@ pub(crate) const EXPANSION_SCORE_THRESHOLD: f32 = 0.05;
 const HARVEST_BAND_FRACTION: f32 = 0.1;
 const HARVEST_BAND_MIN: f32 = 0.04;
 const HARVEST_BAND_MAX: f32 = 0.12;
-/// Candidates per capture session, so a bad pool cannot fill the disk.
-const HARVEST_CAP: u32 = 40;
+/// Candidates per capture session, so a bad pool cannot fill the disk. The
+/// `capture.harvest_cap` setting overrides this; 0 turns harvesting off for a
+/// run without touching the floor.
+const HARVEST_CAP_DEFAULT: u32 = 40;
+const HARVEST_CAP_MAX: u32 = 400;
 const HARVEST_INTERVAL: Duration = Duration::from_millis(400);
 const RECORD_INTERVAL: Duration = Duration::from_millis(250);
 const RECORD_CAP: i64 = 1200;
 
 fn harvest_floor(threshold: f32) -> f32 {
     threshold - (threshold * HARVEST_BAND_FRACTION).clamp(HARVEST_BAND_MIN, HARVEST_BAND_MAX)
+}
+
+/// Where candidate harvesting starts. A match floor is the user's answer to how
+/// far below the line a proposal is still worth reviewing, so it becomes the
+/// cutoff whenever one is set. With no floor, the near-miss band keeps a fresh
+/// project from filling its queue with everything the detector proposes.
+fn harvest_cutoff(threshold: f32, floor: f32) -> f32 {
+    if floor > 0.0 {
+        floor
+    } else {
+        harvest_floor(threshold)
+    }
+}
+
+/// Reads the per session candidate cap. An unreadable value falls back to the
+/// default so a bad setting cannot stop a capture run from harvesting at all.
+fn read_harvest_cap(conn: &rusqlite::Connection) -> u32 {
+    conn.query_row(
+        "select value from setting where key = 'capture.harvest_cap'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|value| value.trim().parse::<u32>().ok())
+    .map(|value| value.min(HARVEST_CAP_MAX))
+    .unwrap_or(HARVEST_CAP_DEFAULT)
 }
 
 #[derive(Clone, Serialize)]
@@ -141,6 +175,9 @@ pub struct DetectionPayload {
     pub captured_at_ms: f64,
     pub published_at_ms: f64,
     pub crop: Option<Crop>,
+    /// Class name to its label colour, so the overlay draws each box in the
+    /// colour the project already uses on the Label page.
+    pub colors: std::collections::HashMap<String, String>,
     pub boxes: Vec<TrackedBox>,
 }
 
@@ -252,6 +289,23 @@ impl FrameSlot {
 
     pub fn take(&self) -> Option<Frame> {
         self.current.lock().ok().and_then(|mut guard| guard.take())
+    }
+
+    /// Takes a frame only when it is recent enough to be worth processing.
+    /// A stale frame stays in the slot so the producer's next publish counts
+    /// as an overwrite and the freshness wait does not look like a frame that
+    /// was processed.
+    pub fn take_fresh(&self, max_age: Duration) -> Option<Frame> {
+        let mut guard = self.current.lock().ok()?;
+        let fresh = guard
+            .as_ref()
+            .map(|frame| frame.captured_at.elapsed() <= max_age)
+            .unwrap_or(false);
+        if fresh {
+            guard.take()
+        } else {
+            None
+        }
     }
 
     pub fn dropped(&self) -> u64 {
@@ -569,7 +623,9 @@ pub fn capture_start(
                 Plan::Display { target, .. } => {
                     display_run(&run, target, DEFAULT_INTERVAL_MS)
                 }
-                Plan::Window { target, .. } => still_window(&run, target),
+                Plan::Window { target, .. } => {
+                    window_run(&run, target, DEFAULT_INTERVAL_MS)
+                }
                 Plan::Sequence { paths, .. } => play_sequence(&run, paths),
             };
             let note = match outcome {
@@ -1117,6 +1173,27 @@ fn stream_display(run: &Arc<Mutex<Run>>, target: &str) -> Result<(), String> {
     result
 }
 
+/// Window capture prefers Graphics Capture, which is driven by the compositor
+/// and delivers frames at the window's own rate. The still window path remains
+/// for windows or drivers that refuse a capture item.
+fn window_run(run: &Arc<Mutex<Run>>, target: &str, interval_ms: u64) -> Result<(), String> {
+    let cadence = display_cadence_ms(interval_ms);
+    match wgc::window(run, target, cadence) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if run.lock().map(|guard| guard.stopping()).unwrap_or(true) {
+                return Ok(());
+            }
+            if let Ok(mut guard) = run.lock() {
+                guard.note = Some(format!(
+                    "{error}. Falling back to still window capture, which is much slower."
+                ));
+            }
+            still_window(run, target)
+        }
+    }
+}
+
 /// Fallback when streaming is refused. Slow by construction, and the note says
 /// so, because a silent three frames a second looks like a bug.
 fn still_display(
@@ -1169,7 +1246,7 @@ fn still_window(run: &Arc<Mutex<Run>>, target: &str) -> Result<(), String> {
         .parse()
         .map_err(|_| "That window is gone. Pick it again.".to_string())?;
     if let Ok(mut guard) = run.lock() {
-        guard.backend = "window capture".into();
+        guard.backend = "still window capture".into();
     }
     loop {
         let stopping = run.lock().map(|guard| guard.stopping()).unwrap_or(true);
@@ -1244,8 +1321,19 @@ fn play_sequence(run: &Arc<Mutex<Run>>, paths: &[PathBuf]) -> Result<(), String>
                 let width = image.width();
                 let height = image.height();
                 let raw = checkout_copy(run, image.as_raw());
+                // Decode time belongs in the capture cost, not in the age of the
+                // frame. Stamping before the decode made the freshness gate drop
+                // replay frames whose JPEG took longer than 8 ms to open.
+                let available_at = Instant::now();
                 if let Ok(mut guard) = run.lock() {
-                    guard.accept(raw, width, height, Some(interval), started.elapsed(), started);
+                    guard.accept(
+                        raw,
+                        width,
+                        height,
+                        Some(interval),
+                        started.elapsed(),
+                        available_at,
+                    );
                 }
             }
             Err(error) => {
@@ -1278,6 +1366,7 @@ mod wgc {
     use windows_capture::frame::Frame as CaptureFrame;
     use windows_capture::graphics_capture_api::InternalCaptureControl;
     use windows_capture::monitor::Monitor as CaptureMonitor;
+    use windows_capture::window::Window as CaptureWindow;
     use windows_capture::settings::{
         ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
         MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
@@ -1350,6 +1439,12 @@ mod wgc {
         }
 
         fn on_closed(&mut self) -> Result<(), Self::Error> {
+            if let Ok(mut run) = self.run.lock() {
+                if !run.stopping() {
+                    run.fail("The capture target closed");
+                    run.stop.store(true, Ordering::Relaxed);
+                }
+            }
             Ok(())
         }
     }
@@ -1388,6 +1483,45 @@ mod wgc {
             .stop()
             .map_err(|error| format!("Graphics Capture did not stop cleanly: {error:?}"))
     }
+
+    pub fn window(
+        run: &Arc<Mutex<Run>>,
+        target: &str,
+        interval_ms: u64,
+    ) -> Result<(), String> {
+        let id: u32 = target
+            .parse()
+            .map_err(|_| "That window is gone. Pick it again.".to_string())?;
+        let window = CaptureWindow::from_raw_hwnd(id as usize as *mut std::ffi::c_void);
+        if !window.is_valid() {
+            return Err("Graphics Capture cannot read that window".into());
+        }
+        if let Ok(mut guard) = run.lock() {
+            guard.backend = "window graphics capture".into();
+        }
+        let settings = Settings::new(
+            window,
+            CursorCaptureSettings::WithoutCursor,
+            DrawBorderSettings::WithoutBorder,
+            SecondaryWindowSettings::Include,
+            MinimumUpdateIntervalSettings::Custom(Duration::from_millis(interval_ms.max(1))),
+            DirtyRegionSettings::Default,
+            ColorFormat::Rgba8,
+            run.clone(),
+        );
+        let control = Handler::start_free_threaded(settings).map_err(|error| {
+            format!("Graphics Capture could not start for this window: {error:?}")
+        })?;
+        loop {
+            if run.lock().map(|guard| guard.stopping()).unwrap_or(true) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        control
+            .stop()
+            .map_err(|error| format!("Graphics Capture did not stop cleanly: {error:?}"))
+    }
 }
 
 #[cfg(not(windows))]
@@ -1395,6 +1529,14 @@ mod wgc {
     use super::*;
 
     pub fn display(_run: &Arc<Mutex<Run>>, _interval_ms: u64) -> Result<(), String> {
+        Err("Graphics Capture is only available on Windows".into())
+    }
+
+    pub fn window(
+        _run: &Arc<Mutex<Run>>,
+        _target: &str,
+        _interval_ms: u64,
+    ) -> Result<(), String> {
         Err("Graphics Capture is only available on Windows".into())
     }
 }
@@ -1432,6 +1574,68 @@ impl Histogram {
     }
 }
 
+/// Scores one proposal. The crop is built inside the worker so the full frame
+/// is shared read-only and no crop buffers cross a thread boundary.
+fn match_proposal(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    detection: &Detection,
+    pool: &matcher::Pool,
+) -> Option<matcher::LiveMatch> {
+    let candidate = matcher::embed_detection(raw, width, height, detection)?;
+    let guess = pool.best(&candidate)?;
+    if guess.score < pool.floor {
+        return None;
+    }
+    Some(guess)
+}
+
+/// Scores primary proposals in parallel, preserving their original order so the
+/// refinement and dedupe rules see exactly the sequence they saw before. Four
+/// workers are enough for the handful of proposals a frame produces and avoid
+/// oversubscribing the CPU that capture and the detector also need.
+fn score_primary(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    primary: Vec<Detection>,
+    pool: &matcher::Pool,
+) -> Vec<(Detection, matcher::LiveMatch)> {
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(4)
+        .min(primary.len());
+    if workers < 2 {
+        return primary
+            .into_iter()
+            .filter_map(|detection| {
+                match_proposal(raw, width, height, &detection, pool)
+                    .map(|guess| (detection, guess))
+            })
+            .collect();
+    }
+
+    let chunk = (primary.len() + workers - 1) / workers;
+    let mut slots: Vec<Option<matcher::LiveMatch>> = (0..primary.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        for (detections, results) in primary.chunks(chunk).zip(slots.chunks_mut(chunk)) {
+            scope.spawn(move || {
+                for (detection, slot) in detections.iter().zip(results.iter_mut()) {
+                    *slot = match_proposal(raw, width, height, detection, pool);
+                }
+            });
+        }
+    });
+
+    primary
+        .into_iter()
+        .zip(slots)
+        .filter_map(|(detection, guess)| guess.map(|guess| (detection, guess)))
+        .collect()
+}
+
 /// The inference clock. It takes whatever the newest frame is, thinks about it
 /// for as long as the model needs, and publishes boxes with the capture time
 /// attached so the overlay can say how old they are.
@@ -1451,20 +1655,30 @@ fn inference_loop(
     let mut pool_at = Instant::now() - Duration::from_secs(5);
     let mut tracker = Tracker::new();
     let mut harvested: u32 = 0;
+    let mut harvest_cap = HARVEST_CAP_DEFAULT;
     let mut last_harvest = Instant::now() - HARVEST_INTERVAL;
     let mut harvest_root: Option<PathBuf> = None;
     let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
     let mut recorded_frames: i64 = 0;
     let mut last_record = Instant::now() - RECORD_INTERVAL;
     let started = Instant::now();
+    let mut last_processed = Instant::now();
     let mut session = session;
     let mut model_name: Option<String> = None;
 
     while !stop.load(Ordering::Relaxed) {
-        let Some(frame) = slot.take() else {
+        let frame = slot.take_fresh(FRAME_FRESHNESS).or_else(|| {
+            if last_processed.elapsed() >= STALE_FALLBACK {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        let Some(frame) = frame else {
             thread::sleep(IDLE_POLL);
             continue;
         };
+        last_processed = Instant::now();
 
         // Reload on a slow tick, so a new example starts scoring without
         // restarting the capture thread.
@@ -1474,7 +1688,10 @@ fn inference_loop(
                 let owned = app.state::<AppState>();
                 let guard = owned.db.lock();
                 let loaded = match guard.as_ref() {
-                    Ok(conn) => matcher::load_pool(conn, id),
+                    Ok(conn) => {
+                        harvest_cap = read_harvest_cap(conn);
+                        matcher::load_pool(conn, id)
+                    }
                     Err(error) => Err(error.to_string()),
                 };
                 drop(guard);
@@ -1568,25 +1785,8 @@ fn inference_loop(
                     }
                 }
 
-                let mut scored: Vec<(Detection, matcher::LiveMatch)> = Vec::new();
-                for detection in primary {
-                    let Some(crop) = crop_region(
-                        &frame.raw,
-                        frame.width,
-                        frame.height,
-                        &detection,
-                    ) else {
-                        continue;
-                    };
-                    let candidate = matcher::embed(&crop);
-                    let Some(guess) = pool.best(&candidate) else {
-                        continue;
-                    };
-                    // The project's match floor drops weak proposals before
-                    // they reach the overlay or the review queue.
-                    if guess.score < pool.floor {
-                        continue;
-                    }
+                let mut scored = score_primary(&frame.raw, frame.width, frame.height, primary, &pool);
+                for (_, guess) in &scored {
                     if frame_best
                         .as_ref()
                         .map(|(_, score)| guess.score > *score)
@@ -1594,28 +1794,21 @@ fn inference_loop(
                     {
                         frame_best = Some((guess.name.clone(), guess.score));
                     }
-
-                    // A proposal just under its class's threshold is the one
-                    // worth asking about, so it is saved for review.
-                    if guess.score < guess.threshold
-                        && harvested < HARVEST_CAP
-                        && last_harvest.elapsed() >= HARVEST_INTERVAL
-                        && guess.score >= harvest_floor(guess.threshold)
-                    {
-                        if save_candidate(
-                            &app,
-                            project,
-                            guess.class_id,
-                            guess.score,
-                            &crop,
-                            &mut harvest_root,
-                        ) {
-                            harvested += 1;
-                            last_harvest = Instant::now();
-                        }
-                    }
-                    scored.push((detection, guess));
                 }
+
+                // A proposal under its class's threshold is the one worth
+                // asking about, as long as it clears the match floor. Do the
+                // write after publishing the boxes, so encoding and disk work
+                // cannot delay this frame's overlay.
+                let harvestable: Vec<usize> = scored
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, guess))| {
+                        guess.score < guess.threshold
+                            && guess.score >= harvest_cutoff(guess.threshold, pool.floor)
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
 
                 // Low-confidence proposals are only read when they can contain
                 // a seed that already matched.
@@ -1711,9 +1904,37 @@ fn inference_loop(
                             captured_at_ms: captured_at,
                             published_at_ms: published_at,
                             crop: frame.crop,
+                            colors: pool
+                                .classes
+                                .iter()
+                                .map(|class| (class.name.clone(), class.color.clone()))
+                                .collect(),
                             boxes: tracked,
                         },
                     );
+                }
+
+                for index in harvestable {
+                    if harvested >= harvest_cap || last_harvest.elapsed() < HARVEST_INTERVAL {
+                        break;
+                    }
+                    let (detection, guess) = &scored[index];
+                    let Some(crop) =
+                        crop_region(&frame.raw, frame.width, frame.height, detection)
+                    else {
+                        continue;
+                    };
+                    if save_candidate(
+                        &app,
+                        project,
+                        guess.class_id,
+                        guess.score,
+                        &crop,
+                        &mut harvest_root,
+                    ) {
+                        harvested += 1;
+                        last_harvest = Instant::now();
+                    }
                 }
             }
             Err(error) => board.set(|values| values.note = Some(error)),
@@ -1931,6 +2152,29 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_frame_is_left_for_the_next_publish() {
+        let slot = FrameSlot::default();
+        let frame = |seq: u64, age: Duration| Frame {
+            raw: Arc::new(FrameBuffer::plain(vec![0u8; 4])),
+            width: 1,
+            height: 1,
+            seq,
+            captured_at: Instant::now() - age,
+            crop: None,
+        };
+        slot.publish(frame(1, Duration::from_millis(30)));
+        assert!(slot.take_fresh(Duration::from_millis(8)).is_none());
+        assert_eq!(slot.take().map(|frame| frame.seq), Some(1));
+
+        slot.publish(frame(2, Duration::ZERO));
+        assert_eq!(
+            slot.take_fresh(Duration::from_millis(8))
+                .map(|frame| frame.seq),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn percentiles_land_where_the_samples_say() {
         let mut histogram = Histogram::default();
         for value in 1..=100 {
@@ -1944,6 +2188,55 @@ mod tests {
         // gate summary describe the same samples rather than splitting them.
         let (again_p50, again_p95, again_max) = histogram.summary();
         assert_eq!((again_p50, again_p95, again_max), (50.0, 95.0, 100.0));
+    }
+}
+
+#[cfg(test)]
+mod harvest_tests {
+    use super::{
+        harvest_cutoff, harvest_floor, read_harvest_cap, HARVEST_CAP_DEFAULT, HARVEST_CAP_MAX,
+    };
+
+    #[test]
+    fn the_floor_decides_where_harvesting_starts() {
+        // A floor set by the user replaces the near-miss band, so anything
+        // between it and the class threshold becomes reviewable.
+        assert_eq!(harvest_cutoff(0.85, 0.45), 0.45);
+        assert_eq!(harvest_cutoff(0.70, 0.63), 0.63);
+    }
+
+    #[test]
+    fn the_cap_setting_is_clamped_and_defaults_when_unset() {
+        let conn = rusqlite::Connection::open_in_memory().expect("memory db");
+        conn.execute_batch("create table setting (key text primary key, value text not null);")
+            .expect("setting table");
+        assert_eq!(read_harvest_cap(&conn), HARVEST_CAP_DEFAULT);
+        conn.execute(
+            "insert into setting (key, value) values ('capture.harvest_cap', '120')",
+            [],
+        )
+        .expect("cap row");
+        assert_eq!(read_harvest_cap(&conn), 120);
+        conn.execute(
+            "update setting set value = '9000' where key = 'capture.harvest_cap'",
+            [],
+        )
+        .expect("cap row");
+        assert_eq!(read_harvest_cap(&conn), HARVEST_CAP_MAX);
+        conn.execute(
+            "update setting set value = 'many' where key = 'capture.harvest_cap'",
+            [],
+        )
+        .expect("cap row");
+        assert_eq!(read_harvest_cap(&conn), HARVEST_CAP_DEFAULT);
+    }
+
+    #[test]
+    fn with_no_floor_the_band_still_guards_the_queue() {
+        // Floor zero means off, so the band still keeps the queue from filling
+        // with proposals that are nowhere near the class.
+        assert_eq!(harvest_cutoff(0.70, 0.0), harvest_floor(0.70));
+        assert!((harvest_cutoff(0.85, 0.0) - 0.765).abs() < 1e-6);
     }
 }
 

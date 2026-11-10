@@ -29,7 +29,7 @@ Do these before building any screen. If either fails, the product idea needs a d
 
 ## Phase 1: the shell
 
-- Tauri v2 scaffold, React, TypeScript, Tailwind, shadcn/ui, light and dark, project list.
+- Tauri v2 scaffold, React, TypeScript, Tailwind, shadcn/ui, light and dark, project list, one working project selector shared by every page.
 - Project create, open, delete, with the on-disk layout and SQLite migrations.
 - Source picker: displays, windows, file, folder. Preview of one frame with the crop rectangle.
 - Capture library: import images, bulk import a folder, thumbnail grid.
@@ -52,7 +52,7 @@ Exit: a class with twenty examples boxes the right things in a recorded session 
 
 ## Phase 3: the teaching loop
 
-- Candidate harvesting: proposals whose best score sits in a band around the threshold, saved to disk with a cap per session.
+- Candidate harvesting: proposals whose best score sits between the match floor and the class threshold, saved to disk with a per session cap set in Capture lab.
 - Review queue: candidate, score, nearest three examples side by side.
 - Accept, reject, skip. Accepted becomes a positive with the crop; rejected becomes a negative.
 - Coverage hints: count per class, and a warning when all examples look alike (same angle, same size, same lighting) computed from embedding distance.

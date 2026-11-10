@@ -8,9 +8,10 @@ import type { Box, DetectionPayload, TrackedBox } from "./lib/types";
 const LINE = "rgba(255, 255, 255, 0.92)";
 const HALO = "rgba(0, 0, 0, 0.85)";
 const STALE_MS = 1600;
-/** How far a box may be carried past its detection before the guess is worse
- *  than the staleness. At 12 detections a second this covers one interval. */
-const MAX_EXTRAPOLATION_MS = 180;
+/** Default time a box takes to ease toward its newest position. Detections
+ *  arrive ten to thirty times a second, so easing fills the gap. Capture lab
+ *  overrides this at run time through the overlay_smoothing command. */
+const SMOOTH_DEFAULT_MS = 55;
 
 type Sample = {
   boxes: TrackedBox[];
@@ -57,7 +58,14 @@ export default function Overlay() {
 
     let calibration = false;
     let latest: Sample | null = null;
-    let previous: Sample | null = null;
+    let smoothMs = SMOOTH_DEFAULT_MS;
+    const easing = new Map<number, { x: number; y: number; w: number; h: number }>();
+    // Previous sample positions and times, so each paint can carry a box along
+    // its own velocity instead of waiting for the next detection.
+    let previous: { boxes: Map<number, { x: number; y: number }>; at: number } | null = null;
+    let velocities = new Map<number, { x: number; y: number }>();
+    let lastPaint = 0;
+    let colors: Record<string, string> = {};
     let size = { width: 0, height: 0 };
     let handle = 0;
     let reportAt = performance.now();
@@ -74,68 +82,103 @@ export default function Overlay() {
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
     };
 
-    const drawLabel = (text: string, x: number, y: number) => {
+    const drawLabel = (text: string, x: number, y: number, color: string) => {
       context.font = "600 15px system-ui, sans-serif";
       const textWidth = context.measureText(text).width;
       context.fillStyle = HALO;
       context.fillRect(x, Math.max(0, y - 24), textWidth + 14, 24);
-      context.fillStyle = "#ffffff";
+      context.fillStyle = color;
       context.fillText(text, x + 7, Math.max(16, y - 7));
     };
 
-    const drawBox = (box: TrackedBox, sample: Sample | null, ageMs: number) => {
-      const crop = sample?.crop;
-      let x = box.x;
-      let y = box.y;
-      if (sample && previous && sample.at > previous.at) {
-        const before = previous.boxes.find((entry) => entry.track === box.track);
-        if (before) {
-          const elapsed = sample.at - previous.at;
-          x += ((box.x - before.x) * ageMs) / elapsed;
-          y += ((box.y - before.y) * ageMs) / elapsed;
-        }
-      }
+    const drawBox = (
+      box: TrackedBox,
+      rect: { x: number; y: number; w: number; h: number },
+      crop: Box | null
+    ) => {
       const originX = crop?.x ?? 0;
       const originY = crop?.y ?? 0;
       const scaleX = crop?.w ?? 1;
       const scaleY = crop?.h ?? 1;
-      const left = (originX + x * scaleX) * size.width;
-      const top = (originY + y * scaleY) * size.height;
-      const width = box.w * scaleX * size.width;
-      const height = box.h * scaleY * size.height;
+      const left = (originX + rect.x * scaleX) * size.width;
+      const top = (originY + rect.y * scaleY) * size.height;
+      const width = rect.w * scaleX * size.width;
+      const height = rect.h * scaleY * size.height;
       if (width < 2 || height < 2) return;
 
       context.lineWidth = 5;
       context.strokeStyle = HALO;
       context.strokeRect(left, top, width, height);
+      const color = colors[box.label] ?? LINE;
       context.lineWidth = 2.5;
-      context.strokeStyle = LINE;
+      context.strokeStyle = color;
       context.strokeRect(left, top, width, height);
-      drawLabel(`${box.label} ${box.score.toFixed(2)}`, left, top);
+      drawLabel(`${box.label} ${box.score.toFixed(2)}`, left, top, color);
     };
 
     const paint = (now: number) => {
       handle = requestAnimationFrame(paint);
       const drawStarted = performance.now();
+      const frameMs = lastPaint > 0 ? now - lastPaint : 16.7;
+      lastPaint = now;
       context.clearRect(0, 0, size.width, size.height);
 
       let boxes = 0;
       if (calibration) {
+        easing.clear();
         for (const box of calibrationBoxes(now / 1000)) {
-          drawBox(box, null, 0);
+          drawBox(box, box, null);
           boxes += 1;
         }
       } else if (latest) {
-        const clock = Date.now();
-        const age = clock - latest.at;
+        const age = Date.now() - latest.at;
         if (age > STALE_MS) {
           latest = null;
           previous = null;
+          velocities.clear();
+          easing.clear();
         } else {
-          const carry = Math.min(MAX_EXTRAPOLATION_MS, Math.max(0, age));
+          // Ease toward the newest box instead of predicting where it is going.
+          // Prediction at ten to thirty detections a second overshoots between
+          // samples and snaps back when the next one lands, which reads as
+          // jitter even when the tracker itself is steady.
+          const alpha = smoothMs > 0 ? 1 - Math.exp(-frameMs / smoothMs) : 1;
+          const gap =
+            previous && latest.at > previous.at
+              ? Math.min(250, Math.max(8, latest.at - previous.at))
+              : 16.7;
+          // Carry each box forward by the sample age plus the easing time
+          // constant. Easing alone puts the box a filter's worth of distance
+          // behind a moving target; the lead cancels that without the wild
+          // overshoot of extrapolating past the next detection.
+          const lead = Math.min(gap + smoothMs, Math.max(0, age) + smoothMs);
+          const live = new Set<number>();
           for (const box of latest.boxes) {
-            drawBox(box, latest, carry);
+            live.add(box.track);
+            const before = easing.get(box.track);
+            const next = before
+              ? {
+                  x: before.x + (box.x - before.x) * alpha,
+                  y: before.y + (box.y - before.y) * alpha,
+                  w: before.w + (box.w - before.w) * alpha,
+                  h: before.h + (box.h - before.h) * alpha,
+                }
+              : { x: box.x, y: box.y, w: box.w, h: box.h };
+            easing.set(box.track, next);
+            const velocity = velocities.get(box.track);
+            const drawn = velocity
+              ? {
+                  x: next.x + velocity.x * lead,
+                  y: next.y + velocity.y * lead,
+                  w: next.w,
+                  h: next.h,
+                }
+              : next;
+            drawBox(box, drawn, latest.crop);
             boxes += 1;
+          }
+          for (const track of easing.keys()) {
+            if (!live.has(track)) easing.delete(track);
           }
         }
       }
@@ -162,15 +205,30 @@ export default function Overlay() {
 
     let offDetections: (() => void) | undefined;
     let offCalibration: (() => void) | undefined;
+    let offSmoothing: (() => void) | undefined;
     if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
       listen<DetectionPayload>("spike:detections", (event) => {
         const payload = event.payload;
-        previous = latest;
-        latest = {
-          boxes: payload.boxes,
-          at: payload.publishedAtMs || Date.now(),
-          crop: payload.crop,
+        colors = payload.colors ?? {};
+        const at = payload.publishedAtMs || Date.now();
+        if (previous && at > previous.at) {
+          const elapsed = at - previous.at;
+          const next = new Map<number, { x: number; y: number }>();
+          for (const box of payload.boxes) {
+            const before = previous.boxes.get(box.track);
+            if (!before) continue;
+            next.set(box.track, {
+              x: (box.x - before.x) / elapsed,
+              y: (box.y - before.y) / elapsed,
+            });
+          }
+          velocities = next;
+        }
+        previous = {
+          boxes: new Map(payload.boxes.map((box) => [box.track, { x: box.x, y: box.y }])),
+          at,
         };
+        latest = { boxes: payload.boxes, at, crop: payload.crop };
       }).then((unlisten) => {
         offDetections = unlisten;
       });
@@ -178,9 +236,22 @@ export default function Overlay() {
         calibration = event.payload;
         latest = null;
         previous = null;
+        velocities.clear();
+        easing.clear();
       }).then((unlisten) => {
         offCalibration = unlisten;
       });
+      listen<number>("spike:smoothing", (event) => {
+        const next = Number(event.payload);
+        if (Number.isFinite(next) && next >= 0) smoothMs = next;
+      }).then((unlisten) => {
+        offSmoothing = unlisten;
+      });
+      void invoke<number>("overlay_smoothing", { value: null })
+        .then((value) => {
+          if (Number.isFinite(value) && value >= 0) smoothMs = value;
+        })
+        .catch(() => {});
       void invoke<{ calibration: boolean }>("overlay_state")
         .then((state) => {
           calibration = state.calibration;
@@ -192,6 +263,7 @@ export default function Overlay() {
       cancelAnimationFrame(handle);
       offDetections?.();
       offCalibration?.();
+      offSmoothing?.();
       window.removeEventListener("resize", resize);
     };
   }, []);

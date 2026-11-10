@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, SkipForward, X } from "lucide-react";
+import { Check, SkipForward, Trash2, X } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -10,25 +10,35 @@ import {
   CardHeader,
   CardTitle,
 } from "../components/ui/card";
+import { Input } from "../components/ui/input";
 import { Separator } from "../components/ui/separator";
 import { Skeleton } from "../components/ui/skeleton";
 import { PageHeader } from "../components/page-header";
+import { useProject } from "../components/project-context";
+import { useSidebar } from "../components/sidebar-context";
 import {
+  autoAcceptCandidates,
   candidatePreview,
+  deleteAllCandidates,
+  deleteCandidate,
+  exampleImage,
+  getSetting,
   isDesktop,
   listCandidates,
-  listProjects,
   nearestExamples,
   resolveCandidate,
+  setSetting,
 } from "../lib/api";
 import { formatDate } from "../lib/utils";
-import type { CandidateView, ExampleView, Project } from "../lib/types";
+import type { CandidateView, ExampleView } from "../lib/types";
+import { candidateImage } from "../lib/api";
 
 const QUEUE_PAGE_SIZE = 40;
+const QUEUE_FETCH = 400;
 
 export function ReviewPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const { projects, projectId, selectProject } = useProject();
+  const { live } = useSidebar();
   const [queue, setQueue] = useState<{
     candidates: CandidateView[];
     selected: CandidateView | null;
@@ -40,12 +50,37 @@ export function ReviewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(QUEUE_PAGE_SIZE);
+  const [queueMore, setQueueMore] = useState(false);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [autoFloor, setAutoFloor] = useState(80);
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoInfo, setAutoInfo] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const resolving = useRef(new Set<number>());
   const projectRef = useRef<number | null>(null);
 
   useEffect(() => {
     setVisibleCount(QUEUE_PAGE_SIZE);
+    setAutoInfo(null);
+    setConfirmDeleteAll(false);
   }, [projectId, showAll]);
+
+  useEffect(() => {
+    let alive = true;
+    getSetting("review.auto_floor")
+      .then((value) => {
+        if (!alive || value === null) return;
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) {
+          setAutoFloor(Math.round(parsed));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!selected) return;
@@ -59,32 +94,18 @@ export function ReviewPage() {
   }, [projectId]);
 
   useEffect(() => {
-    let alive = true;
-    listProjects()
-      .then((rows) => {
-        if (!alive) return;
-        setProjects(rows);
-        setProjectId((current) => current ?? rows[0]?.id ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (alive) setError(String(reason));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  useEffect(() => {
     if (!projectId) {
       setQueue({ candidates: [], selected: null });
+      setQueueMore(false);
       setLoading(false);
       return;
     }
     let alive = true;
     setLoading(true);
-    listCandidates(projectId, showAll ? undefined : "pending")
+    listCandidates(projectId, showAll ? undefined : "pending", undefined, QUEUE_FETCH)
       .then((rows) => {
         if (!alive) return;
+        setQueueMore(rows.length >= QUEUE_FETCH);
         setQueue((current) => ({
           candidates: rows,
           selected:
@@ -140,6 +161,33 @@ export function ReviewPage() {
     };
   }, [selected?.id]);
 
+  async function loadOlderQueue() {
+    if (!projectId || queueLoading || !queueMore) return;
+    const oldest = candidates[candidates.length - 1];
+    if (!oldest) return;
+    setQueueLoading(true);
+    try {
+      const rows = await listCandidates(
+        projectId,
+        showAll ? undefined : "pending",
+        oldest.id,
+        QUEUE_FETCH
+      );
+      setQueue((current) => {
+        const seen = new Set(current.candidates.map((row) => row.id));
+        return {
+          ...current,
+          candidates: [...current.candidates, ...rows.filter((row) => !seen.has(row.id))],
+        };
+      });
+      setQueueMore(rows.length >= QUEUE_FETCH);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setQueueLoading(false);
+    }
+  }
+
   function resolve(candidate: CandidateView, decision: "accept" | "reject" | "skip") {
     if (candidate.state !== "pending" || resolving.current.has(candidate.id)) return;
     resolving.current.add(candidate.id);
@@ -191,6 +239,73 @@ export function ReviewPage() {
       .finally(() => resolving.current.delete(candidate.id));
   }
 
+  async function deleteSelected() {
+    if (!selected || deleteBusy) return;
+    const candidate = selected;
+    setDeleteBusy(true);
+    setError(null);
+    try {
+      await deleteCandidate(candidate.id);
+      setQueue((current) => {
+        const remaining = current.candidates.filter((row) => row.id !== candidate.id);
+        return { candidates: remaining, selected: remaining[0] ?? null };
+      });
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+
+  async function deleteAll() {
+    if (!projectId || deleteBusy) return;
+    setDeleteBusy(true);
+    setError(null);
+    try {
+      const deleted = await deleteAllCandidates(projectId);
+      setQueue({ candidates: [], selected: null });
+      setConfirmDeleteAll(false);
+      setAutoInfo(deleted === 1 ? "Deleted 1 candidate." : `Deleted ${deleted} candidates.`);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+
+  async function autoAccept() {
+    if (!projectId) return;
+    setAutoBusy(true);
+    setError(null);
+    setAutoInfo(null);
+    try {
+      const report = await autoAcceptCandidates(projectId, autoFloor / 100);
+      await setSetting("review.auto_floor", String(autoFloor)).catch(() => {});
+      const rows = await listCandidates(
+        projectId,
+        showAll ? undefined : "pending",
+        undefined,
+        QUEUE_FETCH
+      );
+      setQueueMore(rows.length >= QUEUE_FETCH);
+      setQueue((current) => ({
+        candidates: rows,
+        selected: rows.find((row) => row.id === current.selected?.id) ?? rows[0] ?? null,
+      }));
+      setAutoInfo(
+        report.failed > 0
+          ? `Accepted ${report.accepted}; ${report.failed} could not be accepted.`
+          : report.accepted === 1
+            ? "Accepted 1 candidate."
+            : `Accepted ${report.accepted} candidates.`
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setAutoBusy(false);
+    }
+  }
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (
@@ -228,12 +343,15 @@ export function ReviewPage() {
   }, [loading, selected, showAll, projectId]);
 
   const pending = candidates.filter((candidate) => candidate.state === "pending").length;
+  const eligible = candidates.filter(
+    (candidate) => candidate.state === "pending" && candidate.score >= autoFloor / 100
+  ).length;
 
   return (
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Review"
-        description="Candidates just below their class threshold. Accept writes a positive example; reject writes a negative."
+        description="Candidates between the match floor and their class threshold. Accept writes a positive example; reject writes a negative."
         action={
           <Button size="sm" variant="outline" onClick={() => setShowAll((current) => !current)}>
             {showAll ? "Show pending" : "Show reviewed"}
@@ -266,7 +384,8 @@ export function ReviewPage() {
               key={project.id}
               size="sm"
               variant={project.id === projectId ? "secondary" : "ghost"}
-              onClick={() => setProjectId(project.id)}
+              disabled={live}
+              onClick={() => selectProject(project.id)}
             >
               {project.name}
             </Button>
@@ -275,6 +394,85 @@ export function ReviewPage() {
         <Badge variant="secondary" className="ml-auto tabular-nums">
           {pending} pending
         </Badge>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-border p-2.5">
+        <span className="text-xs text-muted-foreground">Auto accept at or above</span>
+        <Input
+          id="review-auto-floor"
+          type="number"
+          min={0}
+          max={100}
+          step={1}
+          value={autoFloor}
+          disabled={autoBusy}
+          aria-label="Auto accept match floor percentage"
+          className="w-20 tabular-nums"
+          onChange={(event) => {
+            const next = Number(event.target.value);
+            setAutoFloor(
+              Number.isFinite(next) ? Math.min(100, Math.max(0, Math.round(next))) : 0
+            );
+            setAutoInfo(null);
+          }}
+          onBlur={() => {
+            void setSetting("review.auto_floor", String(autoFloor)).catch(() => {});
+          }}
+        />
+        <span className="text-sm tabular-nums">%</span>
+        <Button
+          size="sm"
+          className="gap-1.5"
+          disabled={!projectId || autoBusy || loading || eligible === 0}
+          onClick={() => void autoAccept()}
+        >
+          <Check className="size-4" aria-hidden="true" />
+          {autoBusy ? "Accepting" : "Auto accept"}
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          {pending === 0
+            ? "No pending candidates."
+            : eligible === 0
+              ? "None qualify at this floor."
+              : `${eligible} of ${pending} pending candidates qualify.`}
+        </span>
+        <div className="ml-auto flex items-center gap-1.5">
+          {autoInfo ? <span className="text-xs text-muted-foreground">{autoInfo}</span> : null}
+          {confirmDeleteAll ? (
+            <>
+              <span className="text-xs text-muted-foreground">
+                Delete all {candidates.length}?
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={deleteBusy}
+                onClick={() => void deleteAll()}
+              >
+                {deleteBusy ? "Deleting" : "Confirm"}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={deleteBusy}
+                onClick={() => setConfirmDeleteAll(false)}
+              >
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="gap-1.5"
+              disabled={!projectId || deleteBusy || candidates.length === 0}
+              onClick={() => setConfirmDeleteAll(true)}
+            >
+              <Trash2 className="size-4" aria-hidden="true" />
+              Delete all
+            </Button>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -289,7 +487,7 @@ export function ReviewPage() {
             <p className="mt-1.5 max-w-[65ch] text-xs text-muted-foreground">
               {showAll
                 ? "No candidate has been harvested for this project yet."
-                : "Start capture with a model loaded. Proposals that score within 12 percent under their class threshold are saved here, up to forty per session."}
+                : "Start capture with a model loaded. Proposals that score between the match floor and their class threshold are saved here, up to the coverage cap."}
             </p>
           </div>
         </div>
@@ -369,6 +567,16 @@ export function ReviewPage() {
                           S
                         </kbd>
                       </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="ml-auto gap-1.5 text-muted-foreground"
+                        disabled={deleteBusy}
+                        onClick={() => void deleteSelected()}
+                      >
+                        <Trash2 className="size-4" aria-hidden="true" />
+                        Delete
+                      </Button>
                     </div>
                   </>
                 ) : (
@@ -397,7 +605,7 @@ export function ReviewPage() {
                     {nearest.map((example) => (
                       <li key={example.id} className="flex flex-col gap-1.5">
                         <img
-                          src={example.preview}
+                          src={exampleImage(example)}
                           alt={`Example ${example.id}`}
                           loading="lazy"
                           decoding="async"
@@ -441,7 +649,7 @@ export function ReviewPage() {
                         }
                       >
                         <img
-                          src={candidate.thumb}
+                          src={candidateImage(candidate)}
                           alt=""
                           loading="lazy"
                           decoding="async"
@@ -464,22 +672,38 @@ export function ReviewPage() {
                     </li>
                   ))}
                 </ul>
-                {visibleCount < candidates.length ? (
-                  <div className="flex items-center justify-between gap-2 px-1.5 pt-2">
+                {visibleCount < candidates.length || queueMore ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-1.5 pt-2">
                     <span className="text-xs text-muted-foreground tabular-nums">
-                      Showing {visibleCount} of {candidates.length}
+                      {visibleCount < candidates.length
+                        ? `Showing ${visibleCount} of ${candidates.length}`
+                        : `${candidates.length} loaded`}
                     </span>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() =>
-                        setVisibleCount((current) =>
-                          Math.min(candidates.length, current + QUEUE_PAGE_SIZE)
-                        )
-                      }
-                    >
-                      Show {Math.min(QUEUE_PAGE_SIZE, candidates.length - visibleCount)} more
-                    </Button>
+                    <div className="flex items-center gap-1.5">
+                      {visibleCount < candidates.length ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            setVisibleCount((current) =>
+                              Math.min(candidates.length, current + QUEUE_PAGE_SIZE)
+                            )
+                          }
+                        >
+                          Show {Math.min(QUEUE_PAGE_SIZE, candidates.length - visibleCount)} more
+                        </Button>
+                      ) : null}
+                      {queueMore ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={queueLoading}
+                          onClick={() => void loadOlderQueue()}
+                        >
+                          {queueLoading ? "Loading..." : "Load older"}
+                        </Button>
+                      ) : null}
+                    </div>
                   </div>
                 ) : null}
               </CardContent>

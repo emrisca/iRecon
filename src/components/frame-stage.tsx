@@ -10,6 +10,7 @@ import { Minus, Plus } from "lucide-react";
 
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
+import { frameFullImage } from "../lib/api";
 import type { Box, FrameView } from "../lib/types";
 
 const MIN_SCALE = 1;
@@ -166,7 +167,6 @@ export function FrameStage({
     const pan =
       event.button === 1 ||
       event.button === 2 ||
-      event.altKey ||
       event.shiftKey ||
       spaceHeld.current;
     if (pan) {
@@ -274,7 +274,7 @@ export function FrameStage({
         >
           <img
             ref={picture}
-            src={frame.preview}
+            src={frameFullImage(frame)}
             alt="Grabbed frame"
             draggable={false}
             className="pointer-events-none block h-full w-full select-none"

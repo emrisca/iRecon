@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use image::RgbaImage;
 use tauri::{AppHandle, Manager, WebviewWindow};
+use xcap::Monitor;
 
 use crate::capture::pick_monitor;
 
@@ -102,6 +103,21 @@ pub(crate) fn plan_for(source: &dyn ScreenSource) -> GrabPlan {
 pub(crate) fn grab(app: &AppHandle) -> Result<RgbaImage, String> {
     let source = primary_source()?;
     grab_with(app, source.as_ref())
+}
+
+/// Grabs one display by the id stored on a saved source, still leaving iRecon's
+/// windows out of the frame.
+pub(crate) fn grab_display(app: &AppHandle, target: &str) -> Result<RgbaImage, String> {
+    let id: u32 = target
+        .parse()
+        .map_err(|_| "That display is no longer connected".to_string())?;
+    let monitors = Monitor::all().map_err(|error| format!("Could not list displays: {error}"))?;
+    let monitor = monitors
+        .into_iter()
+        .find(|monitor| monitor.id().map(|value| value == id).unwrap_or(false))
+        .ok_or_else(|| "That display is no longer connected".to_string())?;
+    let source = DisplaySource { monitor };
+    grab_with(app, &source)
 }
 
 pub(crate) fn grab_with(app: &AppHandle, source: &dyn ScreenSource) -> Result<RgbaImage, String> {

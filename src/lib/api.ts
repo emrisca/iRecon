@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Box,
@@ -23,6 +23,8 @@ import type {
   Project,
   ProjectDetector,
   DetectorComparison,
+  RoboflowProgress,
+  RoboflowReport,
   SessionAudit,
   SessionEvalFrame,
   SessionFrame,
@@ -33,6 +35,28 @@ import type {
 
 export const isDesktop =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/**
+ * Local thumbnails load through the asset protocol, so the webview fetches and
+ * caches each file instead of a list call carrying base64 for every frame.
+ * Demo frames have no file, so they keep their inline preview.
+ */
+export function frameImage(frame: FrameView): string {
+  if (isDesktop && frame.thumbPath) return convertFileSrc(frame.thumbPath);
+  return frame.preview;
+}
+
+/** The original frame file, for the stage and the selected-frame card. */
+export function frameFullImage(frame: FrameView): string {
+  if (isDesktop && frame.path) return convertFileSrc(frame.path);
+  return frame.preview;
+}
+
+/** An example crop file through the asset protocol, or demo preview data. */
+export function exampleImage(example: ExampleView): string {
+  if (isDesktop && example.thumbPath) return convertFileSrc(example.thumbPath);
+  return example.preview;
+}
 
 let demoId = 1;
 
@@ -168,6 +192,17 @@ export async function createProject(name: string): Promise<Project> {
   return invoke<Project>("project_create", { name });
 }
 
+export async function renameProject(id: number, name: string): Promise<Project> {
+  if (!isDesktop) {
+    const found = demoProjects.find((project) => project.id === id);
+    if (!found) throw new Error("That project is gone");
+    const updated = { ...found, name: name.trim() };
+    demoProjects = demoProjects.map((project) => (project.id === id ? updated : project));
+    return updated;
+  }
+  return invoke<Project>("project_rename", { id, name });
+}
+
 export async function deleteProject(id: number): Promise<void> {
   if (!isDesktop) {
     demoProjects = demoProjects.filter((project) => project.id !== id);
@@ -223,13 +258,84 @@ function demoFrame(): FrameView {
   };
 }
 
-export async function grabFrame(projectId: number): Promise<FrameView> {
+export async function grabFrame(
+  projectId: number,
+  sourceId: number | null = null
+): Promise<FrameView> {
   if (!isDesktop) {
     const frame = demoFrame();
     demoLibrary.set(projectId, [frame, ...demoLibraryFor(projectId)]);
     return frame;
   }
-  return invoke<FrameView>("frame_grab", { projectId });
+  return invoke<FrameView>("frame_grab", { projectId, sourceId });
+}
+
+export type GrabSettings = {
+  shortcut: string | null;
+  projectId: number | null;
+  sourceId: number | null;
+};
+
+export async function grabSettings(): Promise<GrabSettings> {
+  if (!isDesktop) {
+    const saved = window.localStorage.getItem("irecon.label.grabShortcut");
+    return {
+      shortcut: saved === "none" ? null : saved ?? "G",
+      projectId: null,
+      sourceId: null,
+    };
+  }
+  return invoke<GrabSettings>("grab_settings");
+}
+
+export async function setGrabShortcut(shortcut: string | null): Promise<void> {
+  if (!isDesktop) {
+    window.localStorage.setItem("irecon.label.grabShortcut", shortcut ?? "none");
+    return;
+  }
+  await invoke("grab_shortcut_set", { shortcut });
+}
+
+export async function setGrabTarget(
+  projectId: number,
+  sourceId: number | null
+): Promise<void> {
+  if (!isDesktop) {
+    window.localStorage.setItem("irecon.label.project", String(projectId));
+    window.localStorage.setItem(
+      "irecon.label.source",
+      sourceId === null ? "" : String(sourceId)
+    );
+    return;
+  }
+  await invoke("grab_target_set", { projectId, sourceId });
+}
+
+export async function getSetting(key: string): Promise<string | null> {
+  if (!isDesktop) return window.localStorage.getItem(`irecon.setting.${key}`);
+  return invoke<string | null>("setting_get", { key });
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  if (!isDesktop) {
+    window.localStorage.setItem(`irecon.setting.${key}`, value);
+    return;
+  }
+  await invoke("setting_set", { key, value });
+}
+
+export async function onFrameGrabbed(
+  handler: (frame: FrameView) => void
+): Promise<UnlistenFn> {
+  if (!isDesktop) return () => {};
+  return listen<FrameView>("spike:frame-grabbed", (event) => handler(event.payload));
+}
+
+export async function onGrabError(
+  handler: (message: string) => void
+): Promise<UnlistenFn> {
+  if (!isDesktop) return () => {};
+  return listen<string>("spike:grab-error", (event) => handler(event.payload));
 }
 
 export async function listClasses(projectId: number): Promise<LabelClass[]> {
@@ -273,6 +379,43 @@ export async function deleteClass(id: number): Promise<void> {
     return;
   }
   await invoke("class_delete", { id });
+}
+
+export type ClassCleanupReport = {
+  removedClasses: number;
+  removedExamples: number;
+  mergedClasses: number;
+  movedExamples: number;
+};
+
+export async function cleanupClasses(projectId: number): Promise<ClassCleanupReport> {
+  if (!isDesktop) {
+    return { removedClasses: 0, removedExamples: 0, mergedClasses: 0, movedExamples: 0 };
+  }
+  return invoke<ClassCleanupReport>("classes_cleanup", { projectId });
+}
+
+export async function mergeClasses(sourceId: number, targetId: number): Promise<LabelClass> {
+  if (!isDesktop) {
+    const source = demoClassById(sourceId);
+    const target = demoClassById(targetId);
+    if (!source || !target) throw new Error("That class is not in this project");
+    const rows = demoExamples.get(sourceId) ?? [];
+    for (const row of rows) row.classId = targetId;
+    demoExamples.set(targetId, [...rows, ...(demoExamples.get(targetId) ?? [])]);
+    demoExamples.delete(sourceId);
+    for (const [projectId, list] of demoClasses) {
+      if (!list.some((entry) => entry.id === sourceId)) continue;
+      target.examples += source.examples;
+      demoClasses.set(
+        projectId,
+        list.filter((entry) => entry.id !== sourceId)
+      );
+      return { ...target };
+    }
+    throw new Error("That class is not in this project");
+  }
+  return invoke<LabelClass>("classes_merge", { sourceId, targetId });
 }
 
 export async function setClassThreshold(
@@ -324,9 +467,37 @@ export async function createExample(
   });
 }
 
-export async function listExamples(classId: number): Promise<ExampleView[]> {
-  if (!isDesktop) return (demoExamples.get(classId) ?? []).map((entry) => ({ ...entry }));
-  return invoke<ExampleView[]>("examples_list", { classId });
+export async function listExamples(
+  classId: number,
+  limit = 400,
+  beforeId?: number
+): Promise<ExampleView[]> {
+  if (!isDesktop) {
+    const rows = (demoExamples.get(classId) ?? []).filter(
+      (entry) => beforeId === undefined || entry.id < beforeId
+    );
+    return rows.slice(0, limit).map((entry) => ({ ...entry }));
+  }
+  return invoke<ExampleView[]>("examples_list", {
+    classId,
+    limit,
+    beforeId: beforeId ?? null,
+  });
+}
+
+export async function deleteExample(id: number): Promise<void> {
+  if (!isDesktop) {
+    for (const [classId, rows] of demoExamples) {
+      if (!rows.some((entry) => entry.id === id)) continue;
+      const left = rows.filter((entry) => entry.id !== id);
+      demoExamples.set(classId, left);
+      const target = demoClassById(classId);
+      if (target) target.examples = left.length;
+      return;
+    }
+    return;
+  }
+  await invoke("example_delete", { id });
 }
 
 export async function startCapture(
@@ -445,6 +616,11 @@ export async function getOverlayState(): Promise<OverlayState> {
 }
 
 /** Switches the overlay between detections and the sine-wave paint benchmark. */
+export async function overlaySmoothing(value?: number): Promise<number> {
+  if (!isDesktop) return value ?? 55;
+  return invoke<number>("overlay_smoothing", { value: value ?? null });
+}
+
 export async function setCalibration(enabled: boolean): Promise<OverlayState> {
   if (!isDesktop) {
     return { visible: false, calibration: enabled, hotkey: "Ctrl+Alt+O" };
@@ -624,9 +800,64 @@ export async function classAdvice(projectId: number): Promise<ClassAdvice[]> {
   return invoke<ClassAdvice[]>("class_advice", { projectId });
 }
 
-export async function listFrames(projectId: number): Promise<FrameView[]> {
-  if (!isDesktop) return demoLibraryFor(projectId).map((frame) => ({ ...frame }));
-  return invoke<FrameView[]>("library_list", { projectId });
+export async function listFrames(
+  projectId: number,
+  limit?: number
+): Promise<FrameView[]> {
+  if (!isDesktop) {
+    const rows = demoLibraryFor(projectId).map((frame) => ({ ...frame }));
+    return limit === undefined ? rows : rows.slice(0, limit);
+  }
+  return invoke<FrameView[]>("library_list", { projectId, limit: limit ?? null });
+}
+
+/** Frames newer than `afterId`, so a grid can follow an import incrementally. */
+export async function listFramesSince(
+  projectId: number,
+  afterId: number,
+  limit = 60
+): Promise<FrameView[]> {
+  if (!isDesktop) {
+    return demoLibraryFor(projectId)
+      .filter((frame) => frame.id > afterId)
+      .slice(0, limit)
+      .map((frame) => ({ ...frame }));
+  }
+  return invoke<FrameView[]>("library_list_since", { projectId, afterId, limit });
+}
+
+export async function deleteLabeledFrames(projectId: number): Promise<number> {
+  if (!isDesktop) {
+    const rows = demoLibraryFor(projectId);
+    const labeled = rows.filter((frame) => frame.examples > 0);
+    demoLibrary.set(
+      projectId,
+      rows.filter((frame) => frame.examples === 0)
+    );
+    return labeled.length;
+  }
+  return invoke<number>("library_delete_labeled", { projectId });
+}
+
+export async function deleteFrame(frameId: number): Promise<void> {
+  if (!isDesktop) {
+    for (const [projectId, rows] of demoLibrary) {
+      const found = rows.find((frame) => frame.id === frameId);
+      if (!found) continue;
+      if (found.examples > 0) {
+        throw new Error(
+          "This screenshot has saved labels. Delete labeled screenshots from Library."
+        );
+      }
+      demoLibrary.set(
+        projectId,
+        rows.filter((frame) => frame.id !== frameId)
+      );
+      return;
+    }
+    return;
+  }
+  await invoke("library_frame_delete", { frameId });
 }
 
 export async function openFrame(frameId: number): Promise<FrameView> {
@@ -638,6 +869,27 @@ export async function openFrame(frameId: number): Promise<FrameView> {
     throw new Error("That frame is gone");
   }
   return invoke<FrameView>("library_frame", { frameId });
+}
+
+/** Opens the desktop file picker for a PNG or JPEG. Returns null on cancel. */
+export async function pickImageFile(defaultPath?: string): Promise<string | null> {
+  if (!isDesktop) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = await open({
+    directory: false,
+    multiple: false,
+    defaultPath,
+    filters: [{ name: "PNG or JPEG", extensions: ["png", "jpg", "jpeg"] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+/** Opens the desktop folder picker. Returns null when it is cancelled. */
+export async function pickFolder(defaultPath?: string): Promise<string | null> {
+  if (!isDesktop) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = await open({ directory: true, multiple: false, defaultPath });
+  return typeof picked === "string" ? picked : null;
 }
 
 export async function importImages(
@@ -668,6 +920,41 @@ export async function importFolder(
     return { imported: 3, skipped: 0, errors: [] };
   }
   return invoke<ImportReport>("library_import_folder", { projectId, folder });
+}
+
+/**
+ * Imports an extracted Roboflow export: `data.yaml` supplies the class names and
+ * each YOLO label line becomes an example with its crop.
+ */
+export async function importRoboflowDataset(
+  projectId: number,
+  folder: string
+): Promise<RoboflowReport> {
+  if (!isDesktop) {
+    const rows = demoLibraryFor(projectId);
+    const name = folder.split(/[\\/]/).filter(Boolean).pop() ?? "roboflow";
+    for (let index = 0; index < 2; index += 1) {
+      rows.unshift({ ...demoFrame(), path: `${name}/${index + 1}.png` });
+    }
+    return { frames: 2, examples: 4, classes: 2, skipped: 0, cancelled: false, errors: [] };
+  }
+  return invoke<RoboflowReport>("dataset_import_roboflow", { projectId, folder });
+}
+
+/** Progress for the running Roboflow import, emitted a few times a second. */
+export async function onRoboflowProgress(
+  handler: (progress: RoboflowProgress) => void
+): Promise<UnlistenFn> {
+  if (!isDesktop) return () => {};
+  return listen<RoboflowProgress>("roboflow:import-progress", (event) =>
+    handler(event.payload)
+  );
+}
+
+/** Stops the import after the image it is on. Returns false if none is running. */
+export async function cancelRoboflowImport(): Promise<boolean> {
+  if (!isDesktop) return false;
+  return invoke<boolean>("dataset_import_cancel");
 }
 
 let demoSources = new Map<number, SourceView[]>();
@@ -768,16 +1055,79 @@ function demoCandidatesFor(projectId: number): CandidateView[] {
   return rows;
 }
 
+export function candidateImage(candidate: CandidateView): string {
+  return isDesktop && candidate.thumbPath ? convertFileSrc(candidate.thumbPath) : candidate.thumb;
+}
+
 export async function listCandidates(
   projectId: number,
-  state?: string
+  state?: string,
+  beforeId?: number,
+  limit = 400
 ): Promise<CandidateView[]> {
   if (!isDesktop) {
     return demoCandidatesFor(projectId)
       .filter((entry) => !state || entry.state === state)
+      .filter((entry) => beforeId === undefined || entry.id < beforeId)
+      .slice(0, limit)
       .map((entry) => ({ ...entry }));
   }
-  return invoke<CandidateView[]>("candidates_list", { projectId, state: state ?? null });
+  return invoke<CandidateView[]>("candidates_list", {
+    projectId,
+    state: state ?? null,
+    beforeId: beforeId ?? null,
+    limit,
+  });
+}
+
+export type AutoAcceptReport = { accepted: number; failed: number };
+
+export async function autoAcceptCandidates(
+  projectId: number,
+  floor: number
+): Promise<AutoAcceptReport> {
+  if (!isDesktop) {
+    const ids = demoCandidatesFor(projectId)
+      .filter((candidate) => candidate.state === "pending" && candidate.score >= floor)
+      .map((candidate) => candidate.id);
+    let accepted = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await resolveCandidate(id, "accept");
+        accepted += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { accepted, failed };
+  }
+  return invoke<AutoAcceptReport>("candidate_auto_accept", { projectId, floor });
+}
+
+export async function deleteCandidate(id: number): Promise<void> {
+  if (!isDesktop) {
+    for (const rows of demoCandidates.values()) {
+      const index = rows.findIndex((entry) => entry.id === id);
+      if (index >= 0) {
+        rows.splice(index, 1);
+        return;
+      }
+    }
+    return;
+  }
+  await invoke("candidate_delete", { id });
+}
+
+export async function deleteAllCandidates(projectId: number): Promise<number> {
+  if (!isDesktop) {
+    const rows = demoCandidatesFor(projectId);
+    const count = rows.length;
+    rows.splice(0, rows.length);
+    return count;
+  }
+  const report = await invoke<{ deleted: number }>("candidate_delete_all", { projectId });
+  return report.deleted;
 }
 
 export async function candidatePreview(id: number): Promise<string> {

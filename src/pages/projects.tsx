@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { FolderPlus, Plus, Trash2 } from "lucide-react";
+import { FolderPlus, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -7,17 +7,21 @@ import { Input } from "../components/ui/input";
 import { Separator } from "../components/ui/separator";
 import { Skeleton } from "../components/ui/skeleton";
 import { PageHeader } from "../components/page-header";
-import { createProject, deleteProject, listProjects } from "../lib/api";
+import { useProject } from "../components/project-context";
+import { createProject, deleteProject, listProjects, renameProject } from "../lib/api";
 import { formatDate } from "../lib/utils";
 import type { Project } from "../lib/types";
 
 export function ProjectsPage() {
+  const { refresh } = useProject();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -58,8 +62,30 @@ export function ProjectsPage() {
     try {
       const project = await createProject(trimmed);
       setProjects((current) => [project, ...(current ?? [])]);
+      void refresh();
       setName("");
       setCreating(false);
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rename(event: FormEvent, id: number) {
+    event.preventDefault();
+    const trimmed = renameValue.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    try {
+      const updated = await renameProject(id, trimmed);
+      setProjects((current) =>
+        (current ?? []).map((project) => (project.id === id ? updated : project))
+      );
+      void refresh();
+      setRenamingId(null);
+      setRenameValue("");
       setError(null);
     } catch (reason) {
       setError(String(reason));
@@ -73,6 +99,7 @@ export function ProjectsPage() {
     try {
       await deleteProject(id);
       setProjects((current) => (current ?? []).filter((project) => project.id !== id));
+      void refresh();
       setConfirmId(null);
       setError(null);
     } catch (reason) {
@@ -183,12 +210,66 @@ export function ProjectsPage() {
                   <Button
                     size="icon"
                     variant="ghost"
+                    aria-label={`Rename ${project.name}`}
+                    aria-expanded={renamingId === project.id}
+                    onClick={() => {
+                      setConfirmId(null);
+                      if (renamingId === project.id) {
+                        setRenamingId(null);
+                      } else {
+                        setRenamingId(project.id);
+                        setRenameValue(project.name);
+                      }
+                    }}
+                  >
+                    <Pencil className="size-4" aria-hidden="true" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
                     aria-label={`Delete ${project.name}`}
-                    onClick={() => setConfirmId(confirmId === project.id ? null : project.id)}
+                    onClick={() => {
+                      setRenamingId(null);
+                      setConfirmId(confirmId === project.id ? null : project.id);
+                    }}
                   >
                     <Trash2 className="size-4" aria-hidden="true" />
                   </Button>
                 </div>
+
+                {renamingId === project.id ? (
+                  <form
+                    onSubmit={(event) => rename(event, project.id)}
+                    className="flex items-center gap-2 border-t border-border bg-muted p-2"
+                  >
+                    <Input
+                      autoFocus
+                      value={renameValue}
+                      onChange={(event) => setRenameValue(event.target.value)}
+                      aria-label={`New name for ${project.name}`}
+                      maxLength={64}
+                    />
+                    <Button
+                      type="submit"
+                      size="sm"
+                      disabled={
+                        busy ||
+                        renameValue.trim().length === 0 ||
+                        renameValue.trim() === project.name
+                      }
+                    >
+                      Save
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setRenamingId(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </form>
+                ) : null}
 
                 {confirmId === project.id ? (
                   <div className="flex items-center gap-2 border-t border-border bg-muted p-2">

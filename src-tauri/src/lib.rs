@@ -21,6 +21,7 @@ pub mod model;
 pub mod overlay;
 pub mod project_detector;
 pub mod review;
+pub mod roboflow;
 pub mod session;
 pub mod soak;
 pub mod source;
@@ -28,6 +29,8 @@ pub mod tracker;
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
+    /// The app-wide grab shortcut that is currently registered, and its label.
+    pub grab_shortcut: Mutex<Option<(String, Shortcut)>>,
     pub capture: Mutex<Option<capture::CaptureHandle>>,
     pub stats: Arc<Mutex<Option<capture::CaptureStats>>>,
     pub detector: Arc<Mutex<Option<detector::Detector>>>,
@@ -57,6 +60,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -64,6 +68,7 @@ pub fn run() {
             let conn = db::open(&data_dir.join("irecon.sqlite"))?;
             app.manage(AppState {
                 db: Mutex::new(conn),
+                grab_shortcut: Mutex::new(None),
                 capture: Mutex::new(None),
                 stats: Arc::new(Mutex::new(None)),
                 detector: Arc::new(Mutex::new(None)),
@@ -93,6 +98,11 @@ pub fn run() {
             ) {
                 eprintln!("iRecon could not register {}: {error}", overlay::HOTKEY);
             }
+
+            // The Label shortcut is registered with the desktop as well, so it
+            // still grabs a frame while iRecon sits behind another window.
+            label::register_saved_grab_shortcut(app.handle());
+            library::migrate_thumbnails(app.handle());
 
             // G4 measurement mode: show the calibration overlay by itself, with
             // no capture running, and optionally exit after a fixed window. Both
@@ -151,22 +161,34 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             db::projects_list,
             db::project_create,
+            db::project_rename,
             db::project_delete,
             db::project_match_floor,
             db::project_set_match_floor,
+            db::setting_get,
+            db::setting_set,
             advice::class_advice,
             label::frame_grab,
+            label::grab_settings,
+            label::grab_target_set,
+            label::grab_shortcut_set,
+            label::example_delete,
             label::classes_list,
             label::class_create,
             label::class_update,
             label::class_threshold,
             label::class_delete,
+            label::classes_cleanup,
+            label::classes_merge,
             label::example_create,
             label::examples_list,
             label::match_region,
             label::examples_embed,
             library::library_list,
+            library::library_list_since,
             library::library_frame,
+            library::library_frame_delete,
+            library::library_delete_labeled,
             library::library_import,
             library::library_import_folder,
             source::displays_list,
@@ -180,7 +202,10 @@ pub fn run() {
             review::candidates_list,
             review::candidate_preview,
             review::candidate_nearest,
+            review::candidate_auto_accept,
             review::candidate_resolve,
+            review::candidate_delete,
+            review::candidate_delete_all,
             session::session_list,
             session::session_frames,
             session::session_frame_image,
@@ -197,6 +222,8 @@ pub fn run() {
             eval::frame_truth_list,
             eval::frame_truth_set,
             dataset::dataset_export,
+            roboflow::dataset_import_roboflow,
+            roboflow::dataset_import_cancel,
             agent::agent_snapshot,
             agent::agent_act,
             model::model_catalog,
@@ -213,6 +240,7 @@ pub fn run() {
             overlay::overlay_state,
             overlay::overlay_calibration,
             overlay::overlay_paint,
+            overlay::overlay_smoothing,
         ])
         .run(tauri::generate_context!())
         .expect("iRecon failed to start");

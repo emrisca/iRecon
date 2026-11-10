@@ -5,6 +5,7 @@ export type SidebarState = {
   toggle: () => void;
   live: boolean;
   liveBusy: boolean;
+  liveProject: string | null;
   onToggleLive: () => void;
 };
 
@@ -13,6 +14,7 @@ export const SidebarContext = createContext<SidebarState>({
   toggle: () => {},
   live: false,
   liveBusy: false,
+  liveProject: null,
   onToggleLive: () => {},
 });
 

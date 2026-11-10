@@ -11,23 +11,19 @@ import {
   CardTitle,
 } from "../components/ui/card";
 import { PageHeader } from "../components/page-header";
+import { useProject } from "../components/project-context";
+import { useSidebar } from "../components/sidebar-context";
 import { Skeleton } from "../components/ui/skeleton";
 import {
   deleteSession,
   evaluateSession,
   isDesktop,
-  listProjects,
   listSessionFrames,
   listSessions,
   sessionFrameImage,
 } from "../lib/api";
 import { formatDate } from "../lib/utils";
-import type {
-  Detection,
-  Project,
-  SessionFrame,
-  SessionView,
-} from "../lib/types";
+import type { Detection, SessionFrame, SessionView } from "../lib/types";
 
 function duration(ms: number) {
   const seconds = Math.max(0, Math.round(ms / 1000));
@@ -35,8 +31,8 @@ function duration(ms: number) {
 }
 
 export function SessionsPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const { projects, projectId, selectProject } = useProject();
+  const { live } = useSidebar();
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [frames, setFrames] = useState<SessionFrame[]>([]);
@@ -50,22 +46,6 @@ export function SessionsPage() {
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    listProjects()
-      .then((rows) => {
-        if (!alive) return;
-        setProjects(rows);
-        setProjectId((current) => current ?? rows[0]?.id ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (alive) setError(String(reason));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
 
   useEffect(() => {
     if (!projectId) {
@@ -244,7 +224,8 @@ export function SessionsPage() {
               key={project.id}
               size="sm"
               variant={project.id === projectId ? "secondary" : "ghost"}
-              onClick={() => setProjectId(project.id)}
+              disabled={live}
+              onClick={() => selectProject(project.id)}
             >
               {project.name}
             </Button>

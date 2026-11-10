@@ -141,6 +141,56 @@ pub fn overlay_calibration(app: AppHandle, enabled: bool) -> OverlayState {
     state_of(&app)
 }
 
+/// Default box easing in milliseconds. The overlay uses this until Capture lab
+/// sends a different value, and the value is persisted under `overlay.smooth_ms`
+/// so a tuning survives a restart.
+const SMOOTH_DEFAULT_MS: f32 = 55.0;
+const SMOOTH_MAX_MS: f32 = 300.0;
+
+fn stored_smoothing(app: &AppHandle) -> f32 {
+    let state = app.state::<AppState>();
+    let Ok(conn) = state.db.lock() else {
+        return SMOOTH_DEFAULT_MS;
+    };
+    conn.query_row(
+        "select value from setting where key = 'overlay.smooth_ms'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|raw| raw.parse::<f32>().ok())
+    .filter(|ms| ms.is_finite())
+    .map(|ms| ms.clamp(0.0, SMOOTH_MAX_MS))
+    .unwrap_or(SMOOTH_DEFAULT_MS)
+}
+
+/// Reads or changes how long a box takes to ease toward its newest position.
+/// Zero draws boxes where the detection put them, which is what a jitter check
+/// compares against. A change is persisted and pushed to the overlay, so it
+/// applies to a running session without a restart.
+#[tauri::command]
+pub fn overlay_smoothing(app: AppHandle, value: Option<f32>) -> Result<f32, String> {
+    let Some(requested) = value else {
+        return Ok(stored_smoothing(&app));
+    };
+    if !requested.is_finite() {
+        return Err("Smoothing needs a number of milliseconds".into());
+    }
+    let smooth = requested.clamp(0.0, SMOOTH_MAX_MS);
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "insert into setting (key, value) values ('overlay.smooth_ms', ?1)
+             on conflict(key) do update set value = excluded.value",
+            rusqlite::params![smooth.to_string()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("spike:smoothing", smooth);
+    Ok(smooth)
+}
+
 /// Called by the overlay about once a second with what it measured.
 #[tauri::command]
 pub fn overlay_paint(app: AppHandle, fps: f32, draw_ms: f32, boxes: u32) {

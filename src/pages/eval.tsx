@@ -11,27 +11,30 @@ import {
   CardTitle,
 } from "../components/ui/card";
 import { PageHeader } from "../components/page-header";
+import { useProject } from "../components/project-context";
+import { useSidebar } from "../components/sidebar-context";
 import { Skeleton } from "../components/ui/skeleton";
 import {
   evaluateFrames,
+  frameImage,
   isDesktop,
   listClasses,
   listFrameTruth,
   listFrames,
-  listProjects,
   setFrameTruth,
 } from "../lib/api";
 import { formatDate } from "../lib/utils";
-import type { EvalReport, FrameView, LabelClass, Project } from "../lib/types";
+import type { EvalReport, FrameView, LabelClass } from "../lib/types";
 
 function percent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
 export function EvalPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const { projects, projectId, selectProject } = useProject();
+  const { live } = useSidebar();
   const [frames, setFrames] = useState<FrameView[]>([]);
+  const [frameLimit, setFrameLimit] = useState(400);
   const [classes, setClasses] = useState<LabelClass[]>([]);
   const [truth, setTruth] = useState<Record<number, number[]>>({});
   const [selected, setSelected] = useState<number[]>([]);
@@ -39,22 +42,6 @@ export function EvalPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    listProjects()
-      .then((rows) => {
-        if (!alive) return;
-        setProjects(rows);
-        setProjectId((current) => current ?? rows[0]?.id ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (alive) setError(String(reason));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
 
   useEffect(() => {
     if (!projectId) {
@@ -70,7 +57,7 @@ export function EvalPage() {
     setError(null);
     setReport(null);
     Promise.all([
-      listFrames(projectId),
+      listFrames(projectId, frameLimit),
       listClasses(projectId),
       listFrameTruth(projectId),
     ])
@@ -93,6 +80,18 @@ export function EvalPage() {
       alive = false;
     };
   }, [projectId]);
+
+  async function loadOlder() {
+    if (!projectId) return;
+    const next = frameLimit + 400;
+    try {
+      const rows = await listFrames(projectId, next);
+      setFrames(rows);
+      setFrameLimit(next);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
 
   const reportByFrame = useMemo(
     () => new Map((report?.frames ?? []).map((frame) => [frame.frameId, frame])),
@@ -188,15 +187,23 @@ export function EvalPage() {
               key={project.id}
               size="sm"
               variant={project.id === projectId ? "secondary" : "ghost"}
-              onClick={() => setProjectId(project.id)}
+              disabled={live}
+              onClick={() => selectProject(project.id)}
             >
               {project.name}
             </Button>
           ))
         )}
-        <Badge variant="secondary" className="ml-auto tabular-nums">
-          {selected.length} of {frames.length} frames
-        </Badge>
+        <div className="ml-auto flex items-center gap-2">
+          {frames.length >= frameLimit ? (
+            <Button size="sm" variant="outline" onClick={loadOlder}>
+              Load older
+            </Button>
+          ) : null}
+          <Badge variant="secondary" className="tabular-nums">
+            {selected.length} of {frames.length} frames
+          </Badge>
+        </div>
       </div>
 
       {loading ? (
@@ -327,8 +334,10 @@ export function EvalPage() {
                   <CardContent className="flex flex-col gap-2">
                     <div className="relative overflow-hidden rounded-md border border-border">
                       <img
-                        src={frame.preview}
+                        src={frameImage(frame)}
                         alt={`Frame ${frame.id}`}
+                        loading="lazy"
+                        decoding="async"
                         className="block w-full"
                       />
                       {result?.matchedBoxes.map((box, index) => (

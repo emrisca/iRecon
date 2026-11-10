@@ -13,11 +13,22 @@ mission is done when its gate has a recorded number, not when the code compiles.
 Phase 0: Tauri v2 shell, primary display capture, transparent click-through
 topmost overlay, boxes, fps and cost readouts.
 
-Phase 1: project CRUD, source picker with preview and crop, library import,
-classes with thresholds, example editor, review queue.
+Phase 1: project CRUD, one working project selector shared by every page,
+source picker with preview and crop, library import, classes with thresholds,
+example editor, review queue.
 
 Phase 2: capture thread, RF-DETR proposals, matcher, tracker, overlay events,
 status bar, session recording and replay, candidate harvesting.
+
+## Current slice
+
+The working project is global. The sidebar selector and every page's project
+buttons read and write one `ProjectProvider` state, persisted as
+`workspace.project`; `capture.project` is only the migration fallback. Project
+create, rename and delete refresh the shared list. This replaces the old
+per-page "first project" behavior. The desktop walkthrough passed with two
+projects: a page button changed the sidebar selection, and the sidebar changed
+the page's active button. The frontend typecheck also passes.
 
 ## The measurement that framed the plan
 
@@ -155,21 +166,80 @@ E2 and the copy figure come from the probe, which drives the identical settings
 and the identical row copy the app's handler uses. The in-app armed run with a
 game, which is what G1 and G2 are written against, still needs a play session.
 
+### Matcher and box latency
+
+Live Windows Graphics Capture run on the Overwatch window at 2560 by 1440,
+RF-DETR Nano on DirectML, release build, 15 s, project 7 with 405 examples,
+recording off. Timings run from capture timestamp to box publish, before paint.
+
+| Measure | Result |
+| --- | --- |
+| Capture rate | 53.6 fps mean |
+| Inference | 13.2 ms p50, 16.8 ms p95 |
+| Preprocess | 5.4 ms p50 |
+| Matcher | 3.7 ms p50, 18.0 ms p95 |
+| Box latency | **28.1 ms p50**, 41.2 ms p95, 22.2 ms min |
+| Box updates | 31.0/s, 32.3 ms interval |
+
+The matcher scores primary proposals in four workers while preserving proposal
+order, and embeds each crop directly from the captured RGBA frame so no
+per-proposal crop is allocated. A fresh-frame gate leaves frames older than
+8 ms for the producer to replace, with a 250 ms fallback for still and sequence
+sources. An earlier 8-worker attempt was reverted: it oversubscribed the CPU and
+raised inference to 40.5 ms.
+
+The 28.1 ms median clears the 40 ms matcher target. The 41.2 ms p95 is 1.2 ms
+over it, so the tail is not claimed as passing.
+
 ### Gate status
 
 | Gate | Status |
 | --- | --- |
-| G1 capture rate | **Met** by the ten minute harness run: 59.8 fps over the run and over its last 60 s, full display, Graphics Capture. Confirming it with a game on the same path has not been run yet; it awaits a play session. |
+| G1 capture rate | Harness **met** at 59.8 fps over ten minutes, full display, Graphics Capture. The first live game run measured 53.6 fps mean on the Overwatch window, below the 55 fps gate, so game confirmation is still open. |
 | G2 capture cost | **Met**: p50 4.62 ms, p95 4.91 ms, max 9.61 ms across 600 s. Same caveat as G1: compositor motion, not a game. |
-| G3 latency | Instrumented end to end. The pipeline leg before paint measured p95 6.95 ms; the paint leg still awaits a live game session. |
+| G3 latency | Pipeline leg measured **41.2 ms p95** from capture to box publish with the model and matcher, leaving the 130 ms budget to paint; the paint leg over a running game still awaits a play session. |
 | G4 paint rate | **Met**: 60.1 fps mean, p50 60.0, p95 61.0, min 59.9 over 73.6 s with 20 boxes; paint 0.09 ms p50, 0.10 ms p95. Capture idle, animated window behind the overlay. |
 | G5 soak | **Met for the capture path**: ten minutes, RSS +4.0 MB, 0 overwritten frames, 0 errors. Lost clicks and overlay paint drops need the overlay over a game, so they await a user session. |
 | G6 hotkey | Ctrl+Alt+O registered at startup, plus the button. Twenty manual toggles with the game focused await a user session. |
 | G7 recall | The audit tool counts proposals, primary and vehicle boxes per recorded frame. The human count over 100 gameplay frames awaits a user session. |
-| G8 Phase 2 exit | Replay runs at a fixed 20 Hz through the same pipeline. The 20 example class check awaits a user session. |
+| G8 Phase 2 exit | **Met on both halves**, in an isolated gate project: a 20 example class held 20.0 fps on replay with 20.1 box updates/s and 38.9 fps live, and a zero example class drew no box in either run. See the G8 gate run below. |
 
 Nothing above is marked met without a number or a run behind it. The rows that
 depend on a human in front of a game say so rather than passing quietly.
+
+## The G8 gate run
+
+G8 asks for two things in one pass: a class with 20 examples stays above 20 fps,
+and a class with no examples never draws a box. Both halves ran in an isolated
+project (`G8 Gate`) so the existing projects kept their data: one class with
+exactly 20 distinct Enemy examples, and one class with zero.
+
+The replay half replays those examples' source frames from a folder at a fixed
+20 Hz. The first attempt reported 20.1 fps but only 16.8 box updates/s: sequence
+frames were timestamped before decode, so the 8 ms freshness gate discarded
+about one frame in six as stale. `play_sequence` now stamps `available_at` after
+decode and keeps decode time in `capture_ms`, so the gate sees the interval
+between frames rather than between decodes.
+
+| Measure | Replay | Live |
+| --- | --- | --- |
+| Rate | **20.0 fps**, 20.1 updates/s | **38.9 fps**, 291 frames in 7.7 s |
+| Inference | 10.3 ms | 10.3 ms |
+| Matcher | 2.1 ms | 2.5 ms |
+| Latency p50 | 15.3 ms | 21.4 ms |
+| Boxes | 2.53 mean, 1 to 5 | 1 in every frame |
+| Labels drawn | `G8_TARGET` only | `G8_TARGET` only |
+| Empty class boxes | 0 | 0 |
+| Errors | 0 | 0 |
+
+The live half used a 640 by 640 borderless window showing one target frame with
+a small animated dot, because the game window available at the time handed the
+pipeline frames it could not match. Every published payload carried exactly one
+box and none carried the empty class.
+
+The live window is synthetic, so the live row proves the pipeline holds 20 fps
+with a 20 example class on a compositor-fed window, not on gameplay. Recall on
+real matches (G7) and the paint leg over a game (G3) remain open.
 
 ## The soak that measured the app's own clock
 

@@ -22,7 +22,8 @@ rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-tauri = { version = "2.12.5", features = ["macos-private-api"] }
+tauri = { version = "2.12.5", features = ["protocol-asset", "macos-private-api"] }
+tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
@@ -31,4 +32,7 @@ xcap = { version = "0.9.8", features = ["wgc"] }
 # Graphics Capture is the primary display backend on Windows. It measured 106
 # fps against duplication's 53, so it is not optional on the target platform.
 [target.'cfg(windows)'.dependencies]
+# DirectML is the GPU path on Windows. The CPU provider remains the fallback
+# when DirectML cannot register or cannot open the graph.
+ort = { version = "2.0.0-rc.15", features = ["directml"] }
 windows-capture = "2.0.1"

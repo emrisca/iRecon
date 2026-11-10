@@ -24,6 +24,7 @@ pub struct CandidateView {
     pub color: String,
     pub path: String,
     pub thumb: String,
+    pub thumb_path: String,
     pub score: f32,
     pub state: String,
     pub created_at: String,
@@ -48,6 +49,18 @@ fn cached_image(root: &Path, id: i64, path: &str, kind: &str, width: u32, qualit
     label::jpeg_data_url(&bytes)
 }
 
+/// A saved candidate thumb if one exists, otherwise the crop itself. Both are
+/// served through the asset protocol, so listing the queue never decodes an
+/// image and a cold queue stays fast.
+fn cached_thumb_path(root: &Path, id: i64, path: &str) -> String {
+    let cache = root.join("thumbs").join(format!("candidate-{id}-thumb.jpg"));
+    if cache.is_file() {
+        cache.to_string_lossy().to_string()
+    } else {
+        path.to_string()
+    }
+}
+
 #[tauri::command]
 pub fn candidate_preview(app: AppHandle, id: i64) -> Result<String, String> {
     let (project_id, path) = {
@@ -69,9 +82,12 @@ pub fn candidates_list(
     app: AppHandle,
     project_id: i64,
     state: Option<String>,
+    before_id: Option<i64>,
+    limit: Option<u32>,
 ) -> Result<Vec<CandidateView>, String> {
     let state = state.unwrap_or_default();
     let state = if state.is_empty() { None } else { Some(state) };
+    let limit = limit.unwrap_or(400).clamp(1, 400) as i64;
 
     let app_state = app.state::<AppState>();
     let conn = app_state.db.lock().map_err(|e| e.to_string())?;
@@ -81,11 +97,12 @@ pub fn candidates_list(
                     k.state, k.created_at
              from candidate k join class c on c.id = k.class_id
              where k.project_id = ?1 and (?2 is null or k.state = ?2)
-             order by k.id desc limit 200",
+               and (?3 is null or k.id < ?3)
+             order by k.id desc limit ?4",
         )
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map(params![project_id, state], |row| {
+        .query_map(params![project_id, state, before_id, limit], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -117,7 +134,8 @@ pub fn candidates_list(
                     class_id,
                     class_name,
                     color,
-                    thumb: cached_image(&root, id, &path, "thumb", 160, 70),
+                    thumb: String::new(),
+                    thumb_path: cached_thumb_path(&root, id, &path),
                     path,
                     score,
                     state,
@@ -199,22 +217,17 @@ pub fn candidate_nearest(
     let mut by_id: std::collections::HashMap<i64, ExampleView> = rows
         .into_iter()
         .map(|(id, class_id, path, bbox, role, created_at)| {
-            let (width, height, preview) = match image::open(&path) {
-                Ok(image) => {
-                    let image = image.to_rgba8();
-                    (image.width(), image.height(), label::png_data_url(&image))
-                }
-                Err(_) => (0, 0, String::new()),
-            };
+            let (width, height) = image::image_dimensions(&path).unwrap_or((0, 0));
             (
                 id,
                 ExampleView {
                     id,
                     class_id,
-                    path,
+                    path: path.clone(),
                     width,
                     height,
-                    preview,
+                    preview: String::new(),
+                    thumb_path: path,
                     bbox,
                     role,
                     created_at,
@@ -226,6 +239,54 @@ pub fn candidate_nearest(
         .into_iter()
         .filter_map(|(example_id, _)| by_id.remove(&example_id))
         .collect())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoAcceptReport {
+    pub accepted: usize,
+    pub failed: usize,
+}
+
+/// Accepts every pending candidate at or above the chosen floor. Each accept
+/// goes through the same copy-and-embed path as the review buttons, so the new
+/// positives are immediately usable by the matcher.
+#[tauri::command]
+pub fn candidate_auto_accept(
+    app: AppHandle,
+    project_id: i64,
+    floor: f32,
+) -> Result<AutoAcceptReport, String> {
+    let floor = floor.clamp(0.0, 1.0);
+    let ids: Vec<i64> = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut statement = conn
+            .prepare(
+                "select id from candidate
+                 where project_id = ?1 and state = 'pending' and score >= ?2
+                 order by id desc",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map(params![project_id, floor], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|e| e.to_string())?);
+        }
+        ids
+    };
+
+    let mut accepted = 0usize;
+    let mut failed = 0usize;
+    for id in ids {
+        match candidate_resolve(app.clone(), id, "accept".to_string(), None) {
+            Ok(()) => accepted += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    Ok(AutoAcceptReport { accepted, failed })
 }
 
 #[tauri::command]
@@ -328,4 +389,75 @@ pub fn candidate_resolve(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteReport {
+    pub deleted: usize,
+}
+
+/// Removes candidate rows and the crops that belong to them. Accepted
+/// candidates have already been copied into the class folder, so deleting the
+/// candidate leaves that example in place.
+fn delete_candidates(app: &AppHandle, ids: Vec<i64>) -> Result<usize, String> {
+    let mut removed = 0usize;
+    for id in ids {
+        let row = {
+            let state = app.state::<AppState>();
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "select project_id, path from candidate where id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok()
+        };
+        let Some((project_id, path)) = row else {
+            continue;
+        };
+        {
+            let state = app.state::<AppState>();
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            conn.execute("delete from candidate where id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
+        }
+        let _ = std::fs::remove_file(&path);
+        if let Ok((_slug, root)) = label::project_folder(app, project_id) {
+            let thumbs = root.join("thumbs");
+            let _ = std::fs::remove_file(thumbs.join(format!("candidate-{id}-thumb.jpg")));
+            let _ = std::fs::remove_file(thumbs.join(format!("candidate-{id}-preview.jpg")));
+        }
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+#[tauri::command]
+pub fn candidate_delete(app: AppHandle, id: i64) -> Result<(), String> {
+    delete_candidates(&app, vec![id])?;
+    Ok(())
+}
+
+/// Empties the review queue for a project. Only candidate rows and their crops
+/// go; examples created by accepting a candidate are left alone.
+#[tauri::command]
+pub fn candidate_delete_all(app: AppHandle, project_id: i64) -> Result<DeleteReport, String> {
+    let ids: Vec<i64> = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut statement = conn
+            .prepare("select id from candidate where project_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map(params![project_id], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|e| e.to_string())?);
+        }
+        ids
+    };
+    let deleted = delete_candidates(&app, ids)?;
+    Ok(DeleteReport { deleted })
 }

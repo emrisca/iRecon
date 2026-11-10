@@ -153,6 +153,8 @@ pub struct Detector {
     queries: usize,
     slots: usize,
     input_size: u32,
+    provider: &'static str,
+    provider_note: Option<String>,
 }
 
 impl Detector {
@@ -162,10 +164,7 @@ impl Detector {
         if input_size < 32 {
             return Err(format!("A {input_size} px input is too small to run"));
         }
-        let mut session = Session::builder(environment()?)
-            .map_err(|e| e.to_string())?
-            .commit_from_file(path)
-            .map_err(|e| format!("Could not open the ONNX model: {e}"))?;
+        let (mut session, provider, provider_note) = open_session(path)?;
 
         let input_name = session
             .inputs()
@@ -198,6 +197,8 @@ impl Detector {
             queries,
             slots,
             input_size,
+            provider,
+            provider_note,
         })
     }
 
@@ -205,10 +206,7 @@ impl Detector {
     /// from the graph. The same name/shape/output checks and blank warm-up as
     /// the pinned models run before the file is accepted.
     pub fn load_imported(path: &Path) -> Result<Self, String> {
-        let mut session = Session::builder(environment()?)
-            .map_err(|e| e.to_string())?
-            .commit_from_file(path)
-            .map_err(|e| format!("Could not open the ONNX model: {e}"))?;
+        let (mut session, provider, provider_note) = open_session(path)?;
         let input = session
             .inputs()
             .first()
@@ -249,14 +247,20 @@ impl Detector {
             queries,
             slots,
             input_size,
+            provider,
+            provider_note,
         })
     }
 
     pub fn describe(&self) -> String {
-        format!(
-            "{} px input, {} queries, {} class slots",
-            self.input_size, self.queries, self.slots
-        )
+        let mut text = format!(
+            "{} px input, {} queries, {} class slots, {}",
+            self.input_size, self.queries, self.slots, self.provider
+        );
+        if let Some(note) = &self.provider_note {
+            text.push_str(&format!("; {note}"));
+        }
+        text
     }
 
     pub fn input_size(&self) -> u32 {
@@ -388,6 +392,58 @@ impl Detector {
                 run_ms: elapsed_ms,
             },
         ))
+    }
+}
+
+/// Opens the graph on DirectML when Windows offers it, then retries on CPU if
+/// registration or graph loading fails. The retry is intentional: a machine with
+/// an old driver should still run the detector, just more slowly.
+fn open_session(path: &Path) -> Result<(Session, &'static str, Option<String>), String> {
+    #[cfg(windows)]
+    {
+        let directml = ort::ep::DirectML::default()
+            .with_performance_preference(
+                ort::ep::directml::PerformancePreference::HighPerformance,
+            )
+            .build()
+            .error_on_failure();
+        let attempt = Session::builder(environment()?)
+            .map_err(|error| error.to_string())
+            .and_then(|builder| {
+                builder
+                    .with_execution_providers([directml])
+                    .map_err(|error| error.to_string())
+            })
+            .and_then(|mut builder| {
+                builder
+                    .commit_from_file(path)
+                    .map_err(|error| error.to_string())
+            });
+        match attempt {
+            Ok(session) => return Ok((session, "DirectML", None)),
+            Err(error) => {
+                let note = format!("DirectML unavailable, using CPU: {error}");
+                let session = Session::builder(environment()?)
+                    .map_err(|error| format!("Could not open the ONNX model: {error}"))
+                    .and_then(|mut builder| {
+                        builder
+                            .commit_from_file(path)
+                            .map_err(|error| format!("Could not open the ONNX model: {error}"))
+                    })?;
+                return Ok((session, "CPU", Some(note)));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let session = Session::builder(environment()?)
+            .map_err(|error| format!("Could not open the ONNX model: {error}"))
+            .and_then(|mut builder| {
+                builder
+                    .commit_from_file(path)
+                    .map_err(|error| format!("Could not open the ONNX model: {error}"))
+            })?;
+        Ok((session, "CPU", None))
     }
 }
 
