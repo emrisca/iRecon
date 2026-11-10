@@ -1,7 +1,7 @@
 [package]
 name = "irecon"
 default-run = "irecon"
-version = "0.2.0"
+version = "0.3.0"
 description = "Learn what you point at, then box it on your live screen"
 authors = ["emrisca"]
 edition = "2021"
