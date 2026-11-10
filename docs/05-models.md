@@ -41,10 +41,24 @@ The exporter's output order is the thing that breaks integrations, so `detector.
 
 - Input: a tensor named `input`, `1 x 3 x 384 x 384`, float32, RGB, **plain stretch** to 384 square. Not letterboxed: the export was trained and exported this way, and padding here shifts every box.
 - Normalisation: divide by 255, then ImageNet mean `[0.485, 0.456, 0.406]` and standard deviation `[0.229, 0.224, 0.225]`. Channel order is RGB, not BGR.
-- Outputs, matched **by name**, never by shape or index: `dets` `1 x 300 x 4` normalised centre `cx cy w h`, and `labels` `1 x 300 x 91` **pre-sigmoid** logits. Slot 0 is background. 300 queries, no NMS, so the set is already deduplicated.
-- Postprocessing: sigmoid each slot, take the best non-background slot per query, drop below 0.35, convert to corners, clamp to the frame, keep the top 100.
+- Outputs, matched **by name**, never by shape or index: `dets` `1 x 300 x 4` normalised centre `cx cy w h`, and `labels` `1 x 300 x {classes}` **pre-sigmoid** logits. For the stock COCO export that is 91 slots, with slot 0 background. 300 queries, no NMS, so the set is already deduplicated.
+- Postprocessing: sigmoid each slot that has a name, take the best one per query, drop below 0.35, convert to corners, clamp to the frame, keep the top 100.
+
+A fine-tuned model usually has fewer slots than COCO. The loader probes the slot count from the graph and names each slot. Put a `<model>.labels.json` beside the ONNX file when the model does not use the stock COCO layout:
 
 A wrong mean or a swapped channel order produces boxes that look plausible and are subtly wrong, so the constants and the preprocessing test live beside the decode in one module. Query count and class slots are probed from the loaded graph rather than assumed, and the test asserts 300 and 91 for this artifact.
+
+JSON sidecars can be a plain array of class names, or a table with an explicit background slot:
+
+```json
+["Enemy", "Ally"]
+```
+
+```json
+{ "names": ["Enemy", "Ally"], "background": -1 }
+```
+
+With an array, as many names as slots means there is no background slot, and one fewer name means there is one background slot: slot 0 for a 91 slot graph, the last slot for any other size. In the table form, `background` is `-1` for the last slot or a zero-based slot index. Without a sidecar, a 91 slot graph uses the COCO names, a one slot graph is a single `object` class, and any other size treats the last slot as background with numbered names. A sidecar is the only way to tell a two class model with no background apart from a one class model with a spare slot, so custom exports should ship one.
 
 If a future export changes resolution or names, the loader fails loudly instead of silently misreading the output.
 

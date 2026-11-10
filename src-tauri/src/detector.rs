@@ -156,6 +156,8 @@ pub struct Detector {
     provider: &'static str,
     provider_note: Option<String>,
     input_name: String,
+    /// One label per DETR class slot. Background slots are empty strings.
+    slot_names: Vec<String>,
     /// Set when the graph is a stock YOLO export instead of a DETR export.
     yolo: Option<crate::yolo::Shape>,
     labels: Vec<String>,
@@ -196,6 +198,7 @@ impl Detector {
 
         // Sizes come from the graph, not from an assumption about the export.
         let (queries, slots) = probe(&mut session, input_size)?;
+        let slot_names = slot_names_for_model(path, slots)?;
         Ok(Detector {
             session,
             queries,
@@ -204,6 +207,7 @@ impl Detector {
             provider,
             provider_note,
             input_name: INPUT_NAME.to_string(),
+            slot_names,
             yolo: None,
             labels: Vec::new(),
         })
@@ -251,6 +255,7 @@ impl Detector {
                 ));
             }
             let (queries, slots) = probe(&mut session, input_size)?;
+            let slot_names = slot_names_for_model(path, slots)?;
             return Ok(Detector {
                 session,
                 queries,
@@ -259,6 +264,7 @@ impl Detector {
                 provider,
                 provider_note,
                 input_name,
+                slot_names,
                 yolo: None,
                 labels: Vec::new(),
             });
@@ -295,6 +301,7 @@ impl Detector {
             provider,
             provider_note,
             input_name,
+            slot_names: Vec::new(),
             yolo: Some(yolo),
             labels,
         })
@@ -373,7 +380,6 @@ impl Detector {
             .map_err(|e| format!("Inference failed: {e}"))?;
         let elapsed_ms = started.elapsed().as_secs_f32() * 1000.0;
 
-        let mut boxes = Vec::new();
         let mut dets: Option<Vec<f32>> = None;
         let mut logits: Option<Vec<f32>> = None;
         for (index, name) in names.iter().enumerate() {
@@ -387,55 +393,14 @@ impl Detector {
 
         let dets = dets.ok_or("The model returned no boxes")?;
         let logits = logits.ok_or("The model returned no class scores")?;
-        let queries = self.queries.max(1);
-        let slots = self.slots.max(1);
-
-        for query in 0..queries.min(dets.len() / 4).min(logits.len() / slots) {
-            let base = query * slots;
-            let mut best_slot = 0usize;
-            let mut best_score = 0f32;
-            for slot in 1..slots {
-                let score = sigmoid(logits[base + slot]);
-                if score > best_score {
-                    best_score = score;
-                    best_slot = slot;
-                }
-            }
-            if best_score < threshold {
-                continue;
-            }
-
-            let cx = dets[query * 4];
-            let cy = dets[query * 4 + 1];
-            let bw = dets[query * 4 + 2];
-            let bh = dets[query * 4 + 3];
-            let x = (cx - bw / 2.0).clamp(0.0, 1.0);
-            let y = (cy - bh / 2.0).clamp(0.0, 1.0);
-            let w = bw.clamp(0.0, 1.0 - x);
-            let h = bh.clamp(0.0, 1.0 - y);
-            if w <= 0.0 || h <= 0.0 {
-                continue;
-            }
-
-            let label = CLASS_NAMES
-                .get(best_slot)
-                .filter(|name| !name.is_empty())
-                .copied()
-                .unwrap_or("object")
-                .to_string();
-
-            boxes.push(Detection {
-                label,
-                score: best_score,
-                x,
-                y,
-                w,
-                h,
-            });
-        }
-
-        boxes.sort_by(|a, b| b.score.total_cmp(&a.score));
-        boxes.truncate(100);
+        let boxes = decode_detr(
+            &dets,
+            &logits,
+            self.queries,
+            self.slots,
+            &self.slot_names,
+            threshold,
+        );
         Ok((
             boxes,
             AnalysisTiming {
@@ -561,24 +526,33 @@ fn probe(session: &mut Session, input_size: u32) -> Result<(usize, usize), Strin
         .run(ort::inputs![INPUT_NAME => tensor])
         .map_err(|e| format!("The model did not run on a blank input: {e}"))?;
 
-    let mut queries = 0usize;
-    let mut slots = 0usize;
+    let mut dets_len = 0usize;
+    let mut labels_len = 0usize;
     for (index, name) in names.iter().enumerate() {
         let values = tensor_values(&outputs[index])?;
         match name.as_str() {
-            "dets" => queries = values.len() / 4,
-            "labels" => {
-                if queries > 0 {
-                    slots = values.len() / queries;
-                } else {
-                    slots = 91;
-                }
-            }
+            "dets" => dets_len = values.len(),
+            "labels" => labels_len = values.len(),
             _ => {}
         }
     }
-    if queries == 0 || slots == 0 {
+    if dets_len == 0 || labels_len == 0 {
         return Err("Could not read the model's output shapes".into());
+    }
+    if dets_len % 4 != 0 {
+        return Err(format!(
+            "The dets output has {dets_len} values, which is not a whole number of boxes."
+        ));
+    }
+    let queries = dets_len / 4;
+    if labels_len % queries != 0 {
+        return Err(format!(
+            "The labels output has {labels_len} values, which does not divide into {queries} queries."
+        ));
+    }
+    let slots = labels_len / queries;
+    if slots == 0 {
+        return Err("The model has no class slots".into());
     }
     Ok((queries, slots))
 }
@@ -592,6 +566,191 @@ fn tensor_values(output: &ort::value::Value) -> Result<Vec<f32>, String> {
 
 fn sigmoid(value: f32) -> f32 {
     1.0 / (1.0 + (-value).exp())
+}
+
+/// Scores every DETR slot that has a name, so a custom model can use its own
+/// class count and background position instead of COCO's 91 slot layout.
+fn decode_detr(
+    dets: &[f32],
+    logits: &[f32],
+    queries: usize,
+    slots: usize,
+    slot_names: &[String],
+    threshold: f32,
+) -> Vec<Detection> {
+    let slots = slots.max(1);
+    let count = queries
+        .min(dets.len() / 4)
+        .min(logits.len() / slots);
+    let mut boxes = Vec::new();
+
+    for query in 0..count {
+        let base = query * slots;
+        let mut best_slot = None;
+        let mut best_score = 0f32;
+        for slot in 0..slots {
+            if slot_names.get(slot).map_or(true, |name| name.is_empty()) {
+                continue;
+            }
+            let score = sigmoid(logits[base + slot]);
+            if score > best_score {
+                best_score = score;
+                best_slot = Some(slot);
+            }
+        }
+        let Some(slot) = best_slot else {
+            continue;
+        };
+        if best_score < threshold {
+            continue;
+        }
+
+        let cx = dets[query * 4];
+        let cy = dets[query * 4 + 1];
+        let bw = dets[query * 4 + 2];
+        let bh = dets[query * 4 + 3];
+        let x = (cx - bw / 2.0).clamp(0.0, 1.0);
+        let y = (cy - bh / 2.0).clamp(0.0, 1.0);
+        let w = bw.clamp(0.0, 1.0 - x);
+        let h = bh.clamp(0.0, 1.0 - y);
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+
+        boxes.push(Detection {
+            label: slot_names[slot].clone(),
+            score: best_score,
+            x,
+            y,
+            w,
+            h,
+        });
+    }
+
+    boxes.sort_by(|a, b| b.score.total_cmp(&a.score));
+    boxes.truncate(100);
+    boxes
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LabelSidecar {
+    Names(Vec<String>),
+    Table {
+        names: Vec<String>,
+        #[serde(default)]
+        background: Option<i64>,
+    },
+}
+
+/// Reads `<model>.labels.json` when it exists, otherwise falls back to the
+/// stock COCO names or a numbered layout for a custom export.
+fn slot_names_for_model(path: &Path, slots: usize) -> Result<Vec<String>, String> {
+    let sidecar = path.with_extension("labels.json");
+    if !sidecar.exists() {
+        return Ok(default_slot_names(slots));
+    }
+
+    let text = std::fs::read_to_string(&sidecar)
+        .map_err(|error| format!("Could not read {}: {error}", sidecar.display()))?;
+    let parsed: LabelSidecar = serde_json::from_str(&text)
+        .map_err(|error| format!("Could not read {}: {error}", sidecar.display()))?;
+    let (names, background) = match parsed {
+        LabelSidecar::Names(names) => (names, None),
+        LabelSidecar::Table { names, background } => (names, background),
+    };
+    build_slot_names(slots, names, background)
+        .map_err(|error| format!("{}: {error}", sidecar.display()))
+}
+
+fn default_slot_names(slots: usize) -> Vec<String> {
+    if slots == 91 {
+        return CLASS_NAMES
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                if index == 0 {
+                    String::new()
+                } else {
+                    (*name).to_string()
+                }
+            })
+            .collect();
+    }
+    if slots == 1 {
+        return vec!["object".to_string()];
+    }
+    (0..slots)
+        .map(|index| {
+            if index + 1 == slots {
+                String::new()
+            } else {
+                format!("class {}", index + 1)
+            }
+        })
+        .collect()
+}
+
+fn build_slot_names(
+    slots: usize,
+    names: Vec<String>,
+    background: Option<i64>,
+) -> Result<Vec<String>, String> {
+    if slots == 0 {
+        return Err("The model has no class slots".into());
+    }
+    if names.is_empty() {
+        return Err("The labels sidecar has no class names".into());
+    }
+    let names: Vec<String> = names
+        .into_iter()
+        .map(|name| name.trim().to_string())
+        .collect();
+    if names.iter().any(|name| name.is_empty()) {
+        return Err("Every class name in the labels sidecar must be non-empty".into());
+    }
+
+    if names.len() == slots {
+        if background.is_some() {
+            return Err(format!(
+                "A background slot needs {} names, not {}.",
+                slots - 1,
+                slots
+            ));
+        }
+        return Ok(names);
+    }
+
+    if names.len() + 1 == slots {
+        let index = match background {
+            Some(-1) => slots - 1,
+            Some(index) if index >= 0 && (index as usize) < slots => index as usize,
+            Some(_) => {
+                return Err(format!(
+                    "Background must be -1 or a slot from 0 to {}.",
+                    slots - 1
+                ))
+            }
+            None => {
+                if slots == 91 {
+                    0
+                } else {
+                    slots - 1
+                }
+            }
+        };
+        let mut output = names;
+        output.insert(index, String::new());
+        return Ok(output);
+    }
+
+    Err(format!(
+        "The labels sidecar has {} names for {} slots. Use {} names with a background slot or {} without one.",
+        names.len(),
+        slots,
+        slots - 1,
+        slots
+    ))
 }
 
 /// Area average downscale into CHW, RGB, scaled and normalised the way the export
@@ -664,6 +823,101 @@ mod tests {
         assert!((data[0] - (1.0 - MEAN[0]) / STD[0]).abs() < 1e-5);
         assert!((data[1] - (0.0 - MEAN[1]) / STD[1]).abs() < 1e-5);
         assert!((data[2] - (0.0 - MEAN[2]) / STD[2]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_custom_slot_layout_scores_classes_and_skips_background() {
+        let dets = [
+            0.5, 0.5, 0.2, 0.2, 0.5, 0.5, 0.2, 0.2, 0.5, 0.5, 0.2, 0.2, 0.5, 0.5, 0.2,
+            0.2,
+        ];
+        let logits = [
+            -7.0, 4.0, -6.0, -7.0, -6.0, 4.0, 4.0, -7.0, -6.0, -7.0, -7.0, -7.0,
+        ];
+        let names = vec!["Enemy".to_string(), "Ally".to_string(), String::new()];
+        let boxes = decode_detr(&dets, &logits, 4, 3, &names, 0.5);
+        assert_eq!(boxes.len(), 2);
+        assert!(boxes.iter().any(|detection| detection.label == "Enemy"));
+        assert!(boxes.iter().any(|detection| detection.label == "Ally"));
+        assert!(boxes
+            .iter()
+            .all(|detection| (detection.score - 0.982).abs() < 0.01));
+        assert!(boxes
+            .iter()
+            .all(|detection| (detection.x - 0.4).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_single_slot_without_background_is_scored() {
+        let names = vec!["object".to_string()];
+        let boxes = decode_detr(&[0.5, 0.5, 0.2, 0.2], &[4.0], 1, 1, &names, 0.5);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].label, "object");
+    }
+
+    #[test]
+    fn the_default_layout_is_coco_for_91_slots_and_numbered_otherwise() {
+        let coco = default_slot_names(91);
+        assert_eq!(coco.len(), 91);
+        assert!(coco[0].is_empty());
+        assert_eq!(coco[1], "person");
+        assert_eq!(coco[90], "toothbrush");
+        assert_eq!(default_slot_names(1), vec!["object"]);
+        assert_eq!(
+            default_slot_names(3),
+            vec![
+                "class 1".to_string(),
+                "class 2".to_string(),
+                String::new()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_labels_sidecar_can_name_custom_slots() {
+        let dir = Path::new("target").join(format!(
+            "detector-sidecar-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("custom.onnx");
+        std::fs::write(&model, b"placeholder").unwrap();
+
+        std::fs::write(
+            dir.join("custom.labels.json"),
+            r#"{"names":["Enemy","Ally"],"background":-1}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            slot_names_for_model(&model, 3).unwrap(),
+            vec!["Enemy", "Ally", ""]
+        );
+
+        std::fs::write(dir.join("custom.labels.json"), r#"["Enemy","Ally"]"#).unwrap();
+        assert_eq!(
+            slot_names_for_model(&model, 3).unwrap(),
+            vec!["Enemy", "Ally", ""]
+        );
+        assert_eq!(
+            slot_names_for_model(&model, 2).unwrap(),
+            vec!["Enemy", "Ally"]
+        );
+
+        std::fs::write(
+            dir.join("custom.labels.json"),
+            r#"{"names":["Enemy"],"background":0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            slot_names_for_model(&model, 2).unwrap(),
+            vec!["", "Enemy"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

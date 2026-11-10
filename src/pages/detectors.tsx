@@ -267,7 +267,8 @@ export function DetectorsPage() {
                 <CardDescription>
                   RF-DETR exports need a square NCHW input named input plus dets and
                   labels outputs. A stock YOLO export with one box and class score
-                  output also imports.
+                  output also imports. Custom RF-DETR slots can be named in a
+                  labels.json file beside the model.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-2">
