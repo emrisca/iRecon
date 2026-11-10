@@ -4,7 +4,7 @@ A desktop app that learns what you point it at, then boxes those things on your 
 
 You give it a handful of screenshots of the objects you care about: the rival cars in a racing game, a character on screen, a widget in an app. It finds them in live screen capture and draws a box around each one, with a confidence score. Everything stays on your machine. No upload, no account, no per-image billing.
 
-Status: spike running. Capture, the transparent overlay and RF-DETR Nano detection work end to end against a real screen, and the labeling page turns a grabbed frame into a named example. Sample evaluation, the crop matcher and project-trained detectors are still ahead; see [the roadmap](docs/03-roadmap.md).
+Status: 0.4.0. Capture, the transparent overlay, RF-DETR detection, the crop matcher, review, evaluation, project crop classifiers and imported project detectors work end to end. Fine-tuning a detector remains an offline step with the dataset export; see [the roadmap](docs/03-roadmap.md).
 
 ## The loop
 

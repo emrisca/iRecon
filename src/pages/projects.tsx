@@ -123,14 +123,21 @@ export function ProjectsPage() {
       />
 
       {creating ? (
-        <form onSubmit={submit} className="flex items-center gap-2 border-b border-border p-2">
+        <form
+          onSubmit={submit}
+          className="flex flex-wrap items-center gap-2 border-b border-border p-2"
+        >
+          <label htmlFor="new-project-name" className="text-xs text-muted-foreground">
+            Name
+          </label>
           <Input
+            id="new-project-name"
             autoFocus
             value={name}
             onChange={(event) => setName(event.target.value)}
             placeholder="Traffic watch"
-            aria-label="Project name"
             maxLength={64}
+            className="min-w-40 flex-1"
           />
           <Button type="submit" size="sm" disabled={busy || name.trim().length === 0}>
             Create
@@ -240,14 +247,21 @@ export function ProjectsPage() {
                 {renamingId === project.id ? (
                   <form
                     onSubmit={(event) => rename(event, project.id)}
-                    className="flex items-center gap-2 border-t border-border bg-muted p-2"
+                    className="flex flex-wrap items-center gap-2 border-t border-border bg-muted p-2"
                   >
+                    <label
+                      htmlFor={`rename-project-${project.id}`}
+                      className="text-xs text-muted-foreground"
+                    >
+                      Name
+                    </label>
                     <Input
+                      id={`rename-project-${project.id}`}
                       autoFocus
                       value={renameValue}
                       onChange={(event) => setRenameValue(event.target.value)}
-                      aria-label={`New name for ${project.name}`}
                       maxLength={64}
+                      className="min-w-40 flex-1"
                     />
                     <Button
                       type="submit"

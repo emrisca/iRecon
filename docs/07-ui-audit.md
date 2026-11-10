@@ -1,89 +1,55 @@
-# UI audit: one shell, ten screens
+# UI audit: 0.4.0
 
 This audit applies the ui-design, ste100 and unslop skills in this repository. The
-app is a dense desktop tool used by one person who labels a few frames, then runs
-capture against a game. The screen must show the next action, the current state
-and the evidence, in that order.
+app is a dense desktop tool. One person labels a few frames, then runs capture
+against a game. Each screen must show the next action, the current state and the
+evidence, in that order.
 
-## What the screens do
+## Scope
 
-| Screen | Single job | Dominant element |
-| --- | --- | --- |
-| Start here | Get a new project to its first box | Numbered first run |
-| Projects | Choose or create the project | Project list |
-| Sources | Choose where frames come from | Source picker |
-| Library | Find a frame to label | Frame grid |
-| Label | Draw one box and save it | Frame stage |
-| Review | Answer uncertain candidates | Candidate image |
-| Capture lab | Start capture and read its cost | Live frame and metrics |
-| Sessions | Replay and re-score a recording | Session viewer |
-| Detectors | Compare a project model with the shipped one | Comparison table |
-| Evaluate | Measure recall on held-out frames | Recall table |
+The shell and nine screens: Projects, Sources, Library, Label, Review, Capture
+lab, Sessions, Detectors and Evaluate. The audit used the running Vite view at
+976 px and 1280 px, the source tree, and both colour modes.
 
-## Findings
+## What changed
 
-1. Ten destinations sit in one flat list. Setup, teaching and running are mixed,
-   so a new user cannot tell what order to use.
-2. The shell has no way to close the sidebar. The 224 px column is always
-   reserved, even on a narrow window or while inspecting a frame.
-3. Start here repeats the whole navigation as a second list with ten Open
-   buttons. The sidebar already names and opens every screen.
-4. Capture lab stacks eight metric cards, then repeats four of those numbers in
-   a status line. It also carries a long card of limitations that does not help
-   the current run.
-5. Model rows in Capture lab are cards inside a card. Detectors uses raw inputs
-   and two unlabelled selects, so the forms do not match the rest of the app.
-6. Sessions offers a detector audit that reads downsampled previews and says so
-   in its own help text. It reports a number that is not trustworthy.
-7. Library, Sources, Label and Detectors use placeholders or aria-labels where a
-   visible label belongs. Several small gaps are 2 or 4 px, below the 6/8/10
-   scale.
-8. Review and Evaluate use 10 px text. Evaluate uses an em dash as a value.
+1. **Label had a permanent skeleton.** When no frame was open, the frame area
+   showed a loading skeleton forever. It now shows a muted empty panel with the
+   Grab frame action.
+2. **Capture lab had the same permanent skeleton.** The latest frame area now
+   says no frame exists and names the action that creates one.
+3. **Projects used aria-labels for name fields.** The create and rename forms
+   now have visible Name labels with matching `htmlFor` and input ids.
+4. **Label merge had no visible label.** The class merge control now has a
+   visible Merge into label and a select id.
+5. **Sessions and Detectors used native confirm dialogs.** Both now show an
+   inline confirmation bar with Delete and Keep. The file or recording is not
+   removed until the user confirms in the page.
+6. **Loading text sat inside buttons.** Review and Label now show a spinner and
+   the text Loading, with `aria-busy` set. The control stays disabled.
+7. **Evaluate used a text check mark.** The selected class state now uses the
+   lucide Check icon beside the class name, so the label does not depend on the
+   glyph or colour alone.
+8. **Detectors empty states were bare paragraphs.** Project models and Project
+   classifier now use muted panels with an icon and the next action.
+9. **Settings showed a stale version fallback.** The panel now waits for the
+   desktop app version instead of printing 0.3.0 in a browser preview.
+10. **Label action hierarchy was checked.** Grab frame is the default action.
+    Export dataset stays outline. The empty frame state points to Grab frame.
 
-## Plan
+## What remains
 
-### Shell
-
-- Group navigation into Set up, Teach and Run, with Start here above them.
-- Add a sidebar toggle to the page header, close and reopen the whole panel,
-  persist the choice, and add Control+B.
-- Remove the duplicate version badge and the repeated local-only footer line.
-  Settings already shows the version and Start here explains the local promise.
-- Keep one accent for the active item and the live state.
-
-### Start here
-
-- Keep the first-run sequence. Cut the duplicated tab catalog and its ten
-  buttons.
-- Keep the local-only and borderless facts as one compact note.
-
-### Capture lab
-
-- Replace the three stacked toolbars with one run panel: project, source,
-  record and match floor.
-- Keep four primary metrics: frames per second, inference, matcher and frame to
-  box. Move interval, capture percentiles, preprocess, drops, resolution and
-  backend into one status line.
-- Remove the limitations card. Borderless mode stays in Start here.
-- Flatten model rows into divided rows instead of nested cards.
-
-### Screens with duplicated or untrustworthy sections
-
-- Sessions: remove the detector audit action and its output. Keep re-scoring
-  with the current pool, which measures the thing the screen is for.
-- Start here: remove the tab catalog.
-- Capture lab: remove the caveat card.
-
-### Forms and type
-
-- Give Library, Sources, Label and Detectors visible labels.
-- Replace 10 px text with the 12 px meta size.
-- Replace the em dash value in Evaluate with n/a.
-- Raise every 2 or 4 px gap to 6 px, and keep 8 and 10 px for groups.
-- Keep the system sans stack, semantic colour tokens and both colour modes.
+- Native `select` controls remain in the sidebar, the Label merge control and
+  the Detectors comparison form. They have visible labels and full keyboard
+  behaviour, but they are not the shadcn/ui Select. Replacing them adds a Radix
+  overlay layer to a dense desktop tool, so this pass did not change them.
+- The browser preview cannot exercise screen capture, file pickers or the
+  overlay. Those desktop-only states need a visual pass in the Tauri window.
+- The window minimum is 960 px, so the 320 px reflow check does not apply. The
+  976 px layout was checked.
 
 ## Out of scope
 
 - No new screens, routes or backend commands.
-- No changes to capture, matching, sessions or detector behaviour.
-- No new component library. Existing shadcn/ui primitives stay in use.
+- No change to capture, matching, sessions or detector behaviour.
+- No new component library.

@@ -44,6 +44,7 @@ export function SessionsPage() {
   const [loading, setLoading] = useState(true);
   const [framesLoading, setFramesLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
@@ -164,11 +165,11 @@ export function SessionsPage() {
 
   async function removeSession() {
     if (!selectedId) return;
-    if (!window.confirm("Delete this recording and its frames?")) return;
     setBusy(true);
     setError(null);
     try {
       await deleteSession(selectedId);
+      setConfirmDelete(false);
       setSelectedId(null);
       setRefresh((value) => value + 1);
     } catch (reason) {
@@ -269,7 +270,10 @@ export function SessionsPage() {
                       ? "flex flex-col gap-1.5 rounded-md border border-border bg-muted p-2 text-left"
                       : "flex flex-col gap-1.5 rounded-md border border-border p-2 text-left hover:bg-muted"
                   }
-                  onClick={() => setSelectedId(session.id)}
+                  onClick={() => {
+                    setConfirmDelete(false);
+                    setSelectedId(session.id);
+                  }}
                 >
                   <span className="flex items-center gap-1.5">
                     <span className="text-sm font-medium">Session {session.id}</span>
@@ -308,14 +312,37 @@ export function SessionsPage() {
                       variant="ghost"
                       className="gap-1.5 text-destructive"
                       disabled={busy}
-                      onClick={removeSession}
+                      aria-expanded={confirmDelete}
+                      onClick={() => setConfirmDelete((current) => !current)}
                     >
                       <Trash2 className="size-4" aria-hidden="true" />
-                      Delete
+                      Delete session
                     </Button>
                   </div>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-2">
+                  {confirmDelete ? (
+                    <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted p-2">
+                      <p className="min-w-40 flex-1 text-xs text-muted-foreground">
+                        Delete this recording and every frame in it?
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        disabled={busy}
+                        onClick={() => void removeSession()}
+                      >
+                        Delete
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setConfirmDelete(false)}
+                      >
+                        Keep
+                      </Button>
+                    </div>
+                  ) : null}
                   {framesLoading ? (
                     <Skeleton className="aspect-video w-full" />
                   ) : current ? (

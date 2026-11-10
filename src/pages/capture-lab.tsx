@@ -623,7 +623,13 @@ export function CaptureLabPage({
                 ))}
               </div>
             ) : (
-              <Skeleton className="aspect-video w-full" />
+              <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-md border border-border bg-muted p-2.5 text-center">
+                <Play className="size-5 text-muted-foreground" aria-hidden="true" />
+                <p className="text-sm font-medium">No frame yet</p>
+                <p className="max-w-[45ch] text-xs text-muted-foreground">
+                  Start capture to see the latest frame and its boxes here.
+                </p>
+              </div>
             )}
             {stats?.note ? (
               <p className="text-xs text-muted-foreground">{stats.note}</p>

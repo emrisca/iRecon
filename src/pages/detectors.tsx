@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { Cpu, RefreshCw, Tags, Trash2 } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -48,6 +48,8 @@ export function DetectorsPage() {
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [detectorId, setDetectorId] = useState<number | null>(null);
   const [sessionId, setSessionId] = useState<number | null>(null);
+  const [confirmDetectorId, setConfirmDetectorId] = useState<number | null>(null);
+  const [confirmClassifierId, setConfirmClassifierId] = useState<number | null>(null);
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
   const [comparison, setComparison] = useState<DetectorComparison | null>(null);
@@ -147,7 +149,6 @@ export function DetectorsPage() {
   }
 
   async function remove(id: number) {
-    if (!window.confirm("Delete this imported detector file?")) return;
     setBusy(true);
     setError(null);
     try {
@@ -155,6 +156,7 @@ export function DetectorsPage() {
       setDetectors((current) => current.filter((row) => row.id !== id));
       if (detectorId === id) setDetectorId(null);
       setComparison(null);
+      setConfirmDetectorId(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -200,12 +202,12 @@ export function DetectorsPage() {
   }
 
   async function removeClassifier(id: number) {
-    if (!window.confirm("Delete this imported classifier file?")) return;
     setBusy(true);
     setError(null);
     try {
       await deleteProjectClassifier(id);
       setClassifiers((current) => current.filter((row) => row.id !== id));
+      setConfirmClassifierId(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -310,50 +312,87 @@ export function DetectorsPage() {
                 <CardTitle>Project models</CardTitle>
                 <CardDescription>
                   {detectors.length === 0
-                    ? "No project detector yet."
+                    ? "Imported detector files appear here."
                     : detectors.length === 1
                       ? "1 imported detector"
                       : `${detectors.length} imported detectors`}
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-1.5">
-                {detectors.length === 0 ? null : (
+                {detectors.length === 0 ? (
+                  <div className="flex items-start gap-2 rounded-md border border-border bg-muted p-2">
+                    <Cpu className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    <p className="text-xs text-muted-foreground">
+                      No project detector yet. Import a model above, then compare it with the
+                      shipped detector on a recording.
+                    </p>
+                  </div>
+                ) : (
                   detectors.map((row) => (
-                    <div
-                      key={row.id}
-                      className={
-                        row.id === detectorId
-                          ? "flex items-start gap-2 rounded-md border border-border bg-muted p-2"
-                          : "flex items-start gap-2 rounded-md border border-border p-2"
-                      }
-                    >
-                      <button
-                        type="button"
-                        className="flex min-w-0 flex-1 flex-col gap-1.5 text-left"
-                        onClick={() => setDetectorId(row.id)}
+                    <div key={row.id} className="flex flex-col gap-1.5">
+                      <div
+                        className={
+                          row.id === detectorId
+                            ? "flex items-start gap-2 rounded-md border border-border bg-muted p-2"
+                            : "flex items-start gap-2 rounded-md border border-border p-2"
+                        }
                       >
-                        <span className="truncate text-sm font-medium">{row.name}</span>
-                        <span className="text-xs text-muted-foreground">
-                          {row.inputSize} px · {formatDate(row.createdAt)}
-                        </span>
-                      </button>
-                      <Button
-                        size="sm"
-                        variant={row.active ? "secondary" : "outline"}
-                        disabled={busy}
-                        onClick={() => setActive(row.id, row.active)}
-                      >
-                        {row.active ? "Deactivate" : "Use live"}
-                      </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        aria-label={`Delete ${row.name}`}
-                        disabled={busy}
-                        onClick={() => remove(row.id)}
-                      >
-                        <Trash2 className="size-4" aria-hidden="true" />
-                      </Button>
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 flex-col gap-1.5 text-left"
+                          onClick={() => setDetectorId(row.id)}
+                        >
+                          <span className="truncate text-sm font-medium">{row.name}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {row.inputSize} px · {formatDate(row.createdAt)}
+                          </span>
+                        </button>
+                        <Button
+                          size="sm"
+                          variant={row.active ? "secondary" : "outline"}
+                          disabled={busy}
+                          onClick={() => setActive(row.id, row.active)}
+                        >
+                          {row.active ? "Deactivate" : "Use live"}
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          aria-label={`Delete ${row.name}`}
+                          aria-expanded={confirmDetectorId === row.id}
+                          disabled={busy}
+                          onClick={() => {
+                            setConfirmClassifierId(null);
+                            setConfirmDetectorId((current) =>
+                              current === row.id ? null : row.id
+                            );
+                          }}
+                        >
+                          <Trash2 className="size-4" aria-hidden="true" />
+                        </Button>
+                      </div>
+                      {confirmDetectorId === row.id ? (
+                        <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted p-2">
+                          <p className="min-w-40 flex-1 text-xs text-muted-foreground">
+                            Delete this imported detector? Its file is removed from the project.
+                          </p>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={busy}
+                            onClick={() => void remove(row.id)}
+                          >
+                            Delete
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setConfirmDetectorId(null)}
+                          >
+                            Keep
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
                   ))
                 )}
@@ -408,39 +447,70 @@ export function DetectorsPage() {
                 </Button>
 
                 {classifiers.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    No project classifier yet.
-                  </p>
+                  <div className="flex items-start gap-2 rounded-md border border-border bg-muted p-2">
+                    <Tags className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    <p className="text-xs text-muted-foreground">
+                      No project classifier yet. Import a crop model above to score proposals
+                      with it instead of the fingerprint pool.
+                    </p>
+                  </div>
                 ) : (
                   classifiers.map((row) => (
-                    <div
-                      key={row.id}
-                      className="flex items-start gap-2 rounded-md border border-border p-2"
-                    >
-                      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                        <span className="truncate text-sm font-medium">{row.name}</span>
-                        <span className="text-xs text-muted-foreground">
-                          {row.inputSize} px · {row.labels.length} labels ·{" "}
-                          {formatDate(row.createdAt)}
-                        </span>
+                    <div key={row.id} className="flex flex-col gap-1.5">
+                      <div className="flex items-start gap-2 rounded-md border border-border p-2">
+                        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                          <span className="truncate text-sm font-medium">{row.name}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {row.inputSize} px · {row.labels.length} labels ·{" "}
+                            {formatDate(row.createdAt)}
+                          </span>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant={row.active ? "secondary" : "outline"}
+                          disabled={busy || live}
+                          onClick={() => setClassifierActive(row.id, row.active)}
+                        >
+                          {row.active ? "Deactivate" : "Use live"}
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          aria-label={`Delete ${row.name}`}
+                          aria-expanded={confirmClassifierId === row.id}
+                          disabled={busy}
+                          onClick={() => {
+                            setConfirmDetectorId(null);
+                            setConfirmClassifierId((current) =>
+                              current === row.id ? null : row.id
+                            );
+                          }}
+                        >
+                          <Trash2 className="size-4" aria-hidden="true" />
+                        </Button>
                       </div>
-                      <Button
-                        size="sm"
-                        variant={row.active ? "secondary" : "outline"}
-                        disabled={busy || live}
-                        onClick={() => setClassifierActive(row.id, row.active)}
-                      >
-                        {row.active ? "Deactivate" : "Use live"}
-                      </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        aria-label={`Delete ${row.name}`}
-                        disabled={busy}
-                        onClick={() => removeClassifier(row.id)}
-                      >
-                        <Trash2 className="size-4" aria-hidden="true" />
-                      </Button>
+                      {confirmClassifierId === row.id ? (
+                        <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted p-2">
+                          <p className="min-w-40 flex-1 text-xs text-muted-foreground">
+                            Delete this imported classifier? Its file is removed from the project.
+                          </p>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={busy}
+                            onClick={() => void removeClassifier(row.id)}
+                          >
+                            Delete
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setConfirmClassifierId(null)}
+                          >
+                            Keep
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
                   ))
                 )}

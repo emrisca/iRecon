@@ -25,7 +25,7 @@ type Props = {
  */
 export function SettingsMenu({ theme, onToggleTheme }: Props) {
   const [open, setOpen] = useState(false);
-  const [version, setVersion] = useState("0.3.0");
+  const [version, setVersion] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [update, setUpdate] = useState<{ install: () => Promise<void> } | null>(null);
 
@@ -146,7 +146,9 @@ export function SettingsMenu({ theme, onToggleTheme }: Props) {
         >
           <div className="flex items-center justify-between gap-2 px-1.5">
             <span className="text-sm font-medium">Settings</span>
-            <span className="text-xs text-muted-foreground tabular-nums">v{version}</span>
+            {version ? (
+              <span className="text-xs text-muted-foreground tabular-nums">v{version}</span>
+            ) : null}
           </div>
 
           <p className="px-1.5 text-xs text-muted-foreground">

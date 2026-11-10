@@ -3,6 +3,7 @@ import {
   Crop,
   Download,
   Keyboard,
+  Loader2,
   Maximize2,
   Minimize2,
   Minus,
@@ -1181,7 +1182,14 @@ export function LabelPage() {
                   action={fullscreenButton}
                 />
               ) : (
-                <Skeleton className="aspect-video w-full" />
+                <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-md border border-border bg-muted p-2.5 text-center">
+                  <Crop className="size-5 text-muted-foreground" aria-hidden="true" />
+                  <p className="text-sm font-medium">No frame open</p>
+                  <p className="max-w-[45ch] text-xs text-muted-foreground">
+                    Press Grab frame to capture the current source. The frame appears here,
+                    ready for a box.
+                  </p>
+                </div>
               )}
               {library.length > 0 ? (
                 <div className="flex flex-col gap-1.5">
@@ -1621,10 +1629,19 @@ export function LabelPage() {
                             <Button
                               size="sm"
                               variant="outline"
+                              className="gap-1.5"
                               disabled={coverageLoading}
+                              aria-busy={coverageLoading}
                               onClick={() => void loadOlderCoverage()}
                             >
-                              {coverageLoading ? "Loading..." : "Load older"}
+                              {coverageLoading ? (
+                                <>
+                                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                                  Loading
+                                </>
+                              ) : (
+                                "Load older"
+                              )}
                             </Button>
                           </div>
                         ) : null}
@@ -1708,9 +1725,11 @@ export function LabelPage() {
               </div>
               {classes.length > 1 ? (
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-muted-foreground">Merge into</span>
+                  <label htmlFor="merge-target" className="text-xs text-muted-foreground">
+                    Merge into
+                  </label>
                   <select
-                    aria-label={`Merge ${selected.name} into another class`}
+                    id="merge-target"
                     value={mergeTarget}
                     onChange={(event) => {
                       setMergeTarget(event.target.value);
@@ -1773,11 +1792,19 @@ export function LabelPage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      className="self-start"
+                      className="gap-1.5 self-start"
                       disabled={examplesLoading}
+                      aria-busy={examplesLoading}
                       onClick={() => void loadOlderExamples()}
                     >
-                      {examplesLoading ? "Loading" : "Load older"}
+                      {examplesLoading ? (
+                        <>
+                          <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                          Loading
+                        </>
+                      ) : (
+                        "Load older"
+                      )}
                     </Button>
                   ) : null}
                 </div>

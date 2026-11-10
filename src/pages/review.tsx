@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, SkipForward, Trash2, X } from "lucide-react";
+import { Check, Loader2, SkipForward, Trash2, X } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -697,10 +697,19 @@ export function ReviewPage() {
                         <Button
                           size="sm"
                           variant="outline"
+                          className="gap-1.5"
                           disabled={queueLoading}
+                          aria-busy={queueLoading}
                           onClick={() => void loadOlderQueue()}
                         >
-                          {queueLoading ? "Loading..." : "Load older"}
+                          {queueLoading ? (
+                            <>
+                              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                              Loading
+                            </>
+                          ) : (
+                            "Load older"
+                          )}
                         </Button>
                       ) : null}
                     </div>

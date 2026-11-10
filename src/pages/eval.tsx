@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Gauge, Play } from "lucide-react";
+import { Check, Gauge, Play } from "lucide-react";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -375,8 +375,8 @@ export function EvalPage() {
                               disabled={busy}
                               className={
                                 present
-                                  ? "rounded-md border px-2 py-1.5 text-xs font-medium"
-                                  : "rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground"
+                                  ? "inline-flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium"
+                                  : "inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground"
                               }
                               style={
                                 present
@@ -385,7 +385,9 @@ export function EvalPage() {
                               }
                               onClick={() => toggleTruth(frame.id, entry.id)}
                             >
-                              {present ? "✓ " : ""}
+                              {present ? (
+                                <Check className="size-3.5" aria-hidden="true" />
+                              ) : null}
                               {entry.name}
                             </button>
                           );
