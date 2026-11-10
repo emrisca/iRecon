@@ -27,6 +27,7 @@ pub mod session;
 pub mod soak;
 pub mod source;
 pub mod tracker;
+pub mod yolo;
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,

@@ -34,7 +34,7 @@ const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 /// Torchvision's 91 slot COCO layout, where slot 0 is background.
-const CLASS_NAMES: [&str; 91] = [
+pub(crate) const CLASS_NAMES: [&str; 91] = [
     "background",
     "person",
     "bicycle",
@@ -155,6 +155,10 @@ pub struct Detector {
     input_size: u32,
     provider: &'static str,
     provider_note: Option<String>,
+    input_name: String,
+    /// Set when the graph is a stock YOLO export instead of a DETR export.
+    yolo: Option<crate::yolo::Shape>,
+    labels: Vec<String>,
 }
 
 impl Detector {
@@ -199,56 +203,100 @@ impl Detector {
             input_size,
             provider,
             provider_note,
+            input_name: INPUT_NAME.to_string(),
+            yolo: None,
+            labels: Vec::new(),
         })
     }
 
     /// Opens a project-trained ONNX file and derives its static square input
-    /// from the graph. The same name/shape/output checks and blank warm-up as
-    /// the pinned models run before the file is accepted.
+    /// from the graph. Two contracts are accepted: the RF-DETR `dets` and
+    /// `labels` pair, or a stock YOLO detection export with one output of
+    /// boxes and class scores. Both are warmed with a blank tensor before the
+    /// file is stored.
     pub fn load_imported(path: &Path) -> Result<Self, String> {
         let (mut session, provider, provider_note) = open_session(path)?;
-        let input = session
-            .inputs()
-            .first()
-            .ok_or("The model has no inputs")?;
-        if input.name() != INPUT_NAME {
-            return Err(format!(
-                "The model expects an input called {}, but iRecon feeds {INPUT_NAME}.",
-                input.name()
-            ));
-        }
-        let input_size = match input.dtype() {
-            ValueType::Tensor { shape, .. } => {
-                let dims: Vec<i64> = shape.iter().copied().collect();
-                if dims.len() != 4 || dims[1] != 3 || dims[2] <= 0 || dims[2] != dims[3] {
-                    return Err(format!(
-                        "Expected a static NCHW float input with three channels and a square image, found {dims:?}."
-                    ));
+        let (input_name, input_size) = {
+            let input = session
+                .inputs()
+                .first()
+                .ok_or("The model has no inputs")?;
+            let name = input.name().to_string();
+            let size = match input.dtype() {
+                ValueType::Tensor { shape, .. } => {
+                    let dims: Vec<i64> = shape.iter().copied().collect();
+                    if dims.len() != 4 || dims[1] != 3 || dims[2] <= 0 || dims[2] != dims[3] {
+                        return Err(format!(
+                            "Expected a static NCHW float input with three channels and a square image, found {dims:?}."
+                        ));
+                    }
+                    dims[2] as u32
                 }
-                dims[2] as u32
-            }
-            _ => return Err("The model input is not a float tensor".into()),
+                _ => return Err("The model input is not a float tensor".into()),
+            };
+            (name, size)
         };
         let outputs: Vec<String> = session
             .outputs()
             .iter()
             .map(|output| output.name().to_string())
             .collect();
-        for required in ["dets", "labels"] {
-            if !outputs.iter().any(|name| name == required) {
+        let has_detr_outputs = outputs.iter().any(|name| name == "dets")
+            && outputs.iter().any(|name| name == "labels");
+
+        if has_detr_outputs {
+            if input_name != INPUT_NAME {
                 return Err(format!(
-                    "The model is missing the {required} output. Found: {outputs:?}"
+                    "The model expects an input called {input_name}, but iRecon feeds {INPUT_NAME}."
                 ));
             }
+            let (queries, slots) = probe(&mut session, input_size)?;
+            return Ok(Detector {
+                session,
+                queries,
+                slots,
+                input_size,
+                provider,
+                provider_note,
+                input_name,
+                yolo: None,
+                labels: Vec::new(),
+            });
         }
-        let (queries, slots) = probe(&mut session, input_size)?;
+
+        if outputs.len() != 1 {
+            return Err(format!(
+                "The model is missing the dets and labels outputs. Found: {outputs:?}"
+            ));
+        }
+        let dims: Vec<i64> = match session.outputs()[0].dtype() {
+            ValueType::Tensor { shape, .. } => shape.iter().copied().collect(),
+            _ => return Err("The YOLO output is not a float tensor".into()),
+        };
+        let yolo = crate::yolo::Shape::from_dims(&dims)?;
+        let labels = crate::yolo::labels(path, yolo.classes());
+
+        // Warm the graph the same way the pinned models are warmed.
+        let zeros = vec![0f32; 3 * (input_size as usize) * (input_size as usize)];
+        let tensor = Tensor::from_array((
+            [1usize, 3, input_size as usize, input_size as usize],
+            zeros.into_boxed_slice(),
+        ))
+        .map_err(|error| error.to_string())?;
+        session
+            .run(ort::inputs![input_name.as_str() => tensor])
+            .map_err(|error| format!("The model did not run on a blank input: {error}"))?;
+
         Ok(Detector {
             session,
-            queries,
-            slots,
+            queries: yolo.anchors,
+            slots: yolo.channels,
             input_size,
             provider,
             provider_note,
+            input_name,
+            yolo: Some(yolo),
+            labels,
         })
     }
 
@@ -297,6 +345,9 @@ impl Detector {
         height: u32,
         threshold: f32,
     ) -> Result<(Vec<Detection>, AnalysisTiming), String> {
+        if let Some(shape) = self.yolo {
+            return self.analyse_yolo(rgba, width, height, threshold, shape);
+        }
         let size = self.input_size;
         let preprocess_started = Instant::now();
         let data = preprocess(rgba, width, height, size);
@@ -385,6 +436,52 @@ impl Detector {
 
         boxes.sort_by(|a, b| b.score.total_cmp(&a.score));
         boxes.truncate(100);
+        Ok((
+            boxes,
+            AnalysisTiming {
+                preprocess_ms,
+                run_ms: elapsed_ms,
+            },
+        ))
+    }
+
+    fn analyse_yolo(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        threshold: f32,
+        shape: crate::yolo::Shape,
+    ) -> Result<(Vec<Detection>, AnalysisTiming), String> {
+        let size = self.input_size;
+        let preprocess_started = Instant::now();
+        let (data, scale, pad_x, pad_y) = crate::yolo::letterbox(rgba, width, height, size);
+        let preprocess_ms = preprocess_started.elapsed().as_secs_f32() * 1000.0;
+        let tensor = Tensor::from_array((
+            [1usize, 3, size as usize, size as usize],
+            data.into_boxed_slice(),
+        ))
+        .map_err(|error| error.to_string())?;
+        let input_name = self.input_name.clone();
+
+        let started = Instant::now();
+        let outputs = self
+            .session
+            .run(ort::inputs![input_name.as_str() => tensor])
+            .map_err(|error| format!("Inference failed: {error}"))?;
+        let elapsed_ms = started.elapsed().as_secs_f32() * 1000.0;
+        let values = tensor_values(&outputs[0])?;
+        let boxes = crate::yolo::decode(
+            &values,
+            shape,
+            &self.labels,
+            threshold,
+            scale,
+            pad_x,
+            pad_y,
+            width,
+            height,
+        );
         Ok((
             boxes,
             AnalysisTiming {

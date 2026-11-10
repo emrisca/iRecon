@@ -265,8 +265,9 @@ export function DetectorsPage() {
               <CardHeader>
                 <CardTitle>Import ONNX</CardTitle>
                 <CardDescription>
-                  The model must take a square NCHW float tensor named input and expose
-                  dets and labels outputs.
+                  RF-DETR exports need a square NCHW input named input plus dets and
+                  labels outputs. A stock YOLO export with one box and class score
+                  output also imports.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-2">
