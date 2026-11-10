@@ -577,6 +577,28 @@ pub fn capture_start(
         }
     }
 
+    // The classifier belongs to the project too. Loading it here means the
+    // inference thread never opens a graph, and a project without one keeps the
+    // fingerprint matcher exactly as before.
+    if let Some(project_id) = project {
+        match crate::classifier::active_model(&app, project_id) {
+            Some((path, labels, _name)) => {
+                if let Ok(classifier) =
+                    crate::classifier::Classifier::load(std::path::Path::new(&path), labels)
+                {
+                    if let Ok(mut guard) = state.classifier.lock() {
+                        *guard = Some(classifier);
+                    }
+                }
+            }
+            None => {
+                if let Ok(mut guard) = state.classifier.lock() {
+                    *guard = None;
+                }
+            }
+        }
+    }
+
     let session = if record.unwrap_or(false) {
         project.and_then(|id| crate::session::start(&app, id).ok())
     } else {
@@ -590,6 +612,7 @@ pub fn capture_start(
     let board = state.board.clone();
     let stats = state.stats.clone();
     let detector = state.detector.clone();
+    let classifier = state.classifier.clone();
     let preview_watch = state.preview_watch.clone();
     let overlay_visible = state.overlay_visible.clone();
 
@@ -650,6 +673,7 @@ pub fn capture_start(
                 inference_slot,
                 inference_stop,
                 detector,
+                classifier,
                 inference_board,
                 preview_watch,
                 overlay_visible,
@@ -1636,6 +1660,57 @@ fn score_primary(
         .collect()
 }
 
+/// A classifier score for one proposal. The crop is only built on this path,
+/// because the fingerprint scorer can sample the raw frame without a copy.
+fn classifier_match(
+    model: &mut crate::classifier::Classifier,
+    pool: &matcher::Pool,
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    detection: &Detection,
+) -> Option<matcher::LiveMatch> {
+    let crop = crop_region(raw, width, height, detection)?;
+    let (index, probabilities) = model
+        .classify(crop.as_raw(), crop.width(), crop.height())
+        .ok()?;
+    let score = *probabilities.get(index)?;
+    if score < pool.floor {
+        return None;
+    }
+    let label = model.labels().get(index)?;
+    let class = pool
+        .classes
+        .iter()
+        .find(|class| class.name.eq_ignore_ascii_case(label))?;
+    Some(matcher::LiveMatch {
+        class_id: class.id,
+        name: class.name.clone(),
+        score,
+        threshold: class.threshold,
+    })
+}
+
+/// Classifier scoring is serial because one ONNX session is not re-entered
+/// from several threads. A handful of proposals still costs a few
+/// milliseconds, and the fingerprint path keeps its parallel workers.
+fn score_primary_classified(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    primary: Vec<Detection>,
+    pool: &matcher::Pool,
+    model: &mut crate::classifier::Classifier,
+) -> Vec<(Detection, matcher::LiveMatch)> {
+    primary
+        .into_iter()
+        .filter_map(|detection| {
+            classifier_match(model, pool, raw, width, height, &detection)
+                .map(|guess| (detection, guess))
+        })
+        .collect()
+}
+
 /// The inference clock. It takes whatever the newest frame is, thinks about it
 /// for as long as the model needs, and publishes boxes with the capture time
 /// attached so the overlay can say how old they are.
@@ -1646,6 +1721,7 @@ fn inference_loop(
     slot: Arc<FrameSlot>,
     stop: Arc<AtomicBool>,
     detector: Arc<Mutex<Option<crate::detector::Detector>>>,
+    classifier: Arc<Mutex<Option<crate::classifier::Classifier>>>,
     board: Arc<StatsBoard>,
     preview_watch: Arc<AtomicBool>,
     overlay_visible: Arc<AtomicBool>,
@@ -1732,7 +1808,13 @@ fn inference_loop(
             continue;
         };
 
-        if pool.examples == 0 {
+        // A classifier scores proposals without a fingerprint pool, so an
+        // empty project is only dead when neither scorer is available.
+        let classifier_ready = classifier
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        if pool.examples == 0 && !classifier_ready {
             board.set(|values| {
                 values.detections = 0;
                 values.best_score = None;
@@ -1785,7 +1867,20 @@ fn inference_loop(
                     }
                 }
 
-                let mut scored = score_primary(&frame.raw, frame.width, frame.height, primary, &pool);
+                let mut scored = {
+                    let mut held = classifier.lock().ok();
+                    match held.as_deref_mut() {
+                        Some(Some(model)) => score_primary_classified(
+                            &frame.raw,
+                            frame.width,
+                            frame.height,
+                            primary,
+                            &pool,
+                            model,
+                        ),
+                        _ => score_primary(&frame.raw, frame.width, frame.height, primary, &pool),
+                    }
+                };
                 for (_, guess) in &scored {
                     if frame_best
                         .as_ref()
@@ -1822,18 +1917,35 @@ fn inference_loop(
                         }) {
                             continue;
                         }
-                        let Some(crop) =
-                            crop_region(&frame.raw, frame.width, frame.height, &detection)
-                        else {
+                        let guess = {
+                            let mut held = classifier.lock().ok();
+                            match held.as_deref_mut() {
+                                Some(Some(model)) => classifier_match(
+                                    model,
+                                    &pool,
+                                    &frame.raw,
+                                    frame.width,
+                                    frame.height,
+                                    &detection,
+                                ),
+                                _ => {
+                                    let Some(crop) = crop_region(
+                                        &frame.raw,
+                                        frame.width,
+                                        frame.height,
+                                        &detection,
+                                    ) else {
+                                        continue;
+                                    };
+                                    let candidate = matcher::embed(&crop);
+                                    pool.best(&candidate)
+                                        .filter(|guess| guess.score >= pool.floor)
+                                }
+                            }
+                        };
+                        let Some(guess) = guess else {
                             continue;
                         };
-                        let candidate = matcher::embed(&crop);
-                        let Some(guess) = pool.best(&candidate) else {
-                            continue;
-                        };
-                        if guess.score < pool.floor {
-                            continue;
-                        }
                         scored.push((detection, guess));
                     }
                 }

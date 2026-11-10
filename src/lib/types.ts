@@ -268,6 +268,17 @@ export type ProjectDetector = {
   createdAt: string;
 };
 
+export type ProjectClassifier = {
+  id: number;
+  projectId: number;
+  name: string;
+  path: string;
+  inputSize: number;
+  labels: string[];
+  active: boolean;
+  createdAt: string;
+};
+
 export type ComparisonSide = {
   name: string;
   inputSize: number;

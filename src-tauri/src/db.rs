@@ -152,6 +152,17 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
 
         create index if not exists session_project on capture_session(project_id);
         create index if not exists project_detector_project on project_detector(project_id);
+        create table if not exists project_classifier (
+            id integer primary key autoincrement,
+            project_id integer not null references project(id) on delete cascade,
+            name text not null,
+            path text not null,
+            input_size integer not null,
+            labels text not null,
+            active integer not null default 0,
+            created_at text not null
+        );
+        create index if not exists project_classifier_project on project_classifier(project_id);
         create index if not exists session_frame_session on session_frame(session_id);
         create index if not exists source_project on source(project_id);
         create index if not exists candidate_pending on candidate(project_id, state);

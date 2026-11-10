@@ -21,6 +21,7 @@ import type {
   OverlayState,
   PaintStats,
   Project,
+  ProjectClassifier,
   ProjectDetector,
   DetectorComparison,
   RoboflowProgress,
@@ -584,6 +585,44 @@ export async function compareDetectors(
     detectorId,
     sessionId,
   });
+}
+
+export async function listProjectClassifiers(
+  projectId: number
+): Promise<ProjectClassifier[]> {
+  if (!isDesktop) return [];
+  return invoke<ProjectClassifier[]>("classifier_list", { projectId });
+}
+
+export async function importProjectClassifier(
+  projectId: number,
+  path: string,
+  name?: string
+): Promise<ProjectClassifier> {
+  if (!isDesktop) throw new Error("Importing a classifier needs the desktop app");
+  return invoke<ProjectClassifier>("classifier_import", {
+    projectId,
+    path,
+    name: name ?? null,
+  });
+}
+
+export async function activateProjectClassifier(
+  projectId: number,
+  id: number
+): Promise<void> {
+  if (!isDesktop) throw new Error("Activating a classifier needs the desktop app");
+  await invoke("classifier_activate", { projectId, id });
+}
+
+export async function deactivateProjectClassifier(projectId: number): Promise<void> {
+  if (!isDesktop) throw new Error("Deactivating a classifier needs the desktop app");
+  await invoke("classifier_deactivate", { projectId });
+}
+
+export async function deleteProjectClassifier(id: number): Promise<void> {
+  if (!isDesktop) return;
+  await invoke("classifier_delete", { id });
 }
 
 export async function watchCapture(watching: boolean): Promise<void> {

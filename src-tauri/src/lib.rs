@@ -9,6 +9,7 @@ use tauri_plugin_global_shortcut::{
 pub mod advice;
 pub mod agent;
 pub mod capture;
+pub mod classifier;
 pub mod dataset;
 pub mod db;
 pub mod detector;
@@ -34,6 +35,9 @@ pub struct AppState {
     pub capture: Mutex<Option<capture::CaptureHandle>>,
     pub stats: Arc<Mutex<Option<capture::CaptureStats>>>,
     pub detector: Arc<Mutex<Option<detector::Detector>>>,
+    /// Active crop classifier for live proposal scoring. None means the
+    /// fingerprint matcher scores proposals.
+    pub classifier: Arc<Mutex<Option<classifier::Classifier>>>,
     pub loaded_model: Arc<Mutex<Option<String>>>,
     /// True while a screen in the app is showing frames, so the capture thread
     /// does not encode a preview nobody looks at.
@@ -72,6 +76,7 @@ pub fn run() {
                 capture: Mutex::new(None),
                 stats: Arc::new(Mutex::new(None)),
                 detector: Arc::new(Mutex::new(None)),
+                classifier: Arc::new(Mutex::new(None)),
                 loaded_model: Arc::new(Mutex::new(None)),
                 preview_watch: Arc::new(AtomicBool::new(false)),
                 overlay_visible: Arc::new(AtomicBool::new(false)),
@@ -218,6 +223,11 @@ pub fn run() {
             project_detector::detector_deactivate,
             project_detector::detector_delete,
             project_detector::detector_compare,
+            classifier::classifier_import,
+            classifier::classifier_list,
+            classifier::classifier_activate,
+            classifier::classifier_deactivate,
+            classifier::classifier_delete,
             eval::evaluate_frames,
             eval::frame_truth_list,
             eval::frame_truth_set,

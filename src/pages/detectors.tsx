@@ -16,18 +16,24 @@ import { useProject } from "../components/project-context";
 import { useSidebar } from "../components/sidebar-context";
 import { Skeleton } from "../components/ui/skeleton";
 import {
+  activateProjectClassifier,
   activateProjectDetector,
   compareDetectors,
+  deactivateProjectClassifier,
   deactivateProjectDetector,
+  deleteProjectClassifier,
   deleteProjectDetector,
+  importProjectClassifier,
   importProjectDetector,
   isDesktop,
+  listProjectClassifiers,
   listProjectDetectors,
   listSessions,
 } from "../lib/api";
 import { formatDate } from "../lib/utils";
 import type {
   DetectorComparison,
+  ProjectClassifier,
   ProjectDetector,
   SessionView,
 } from "../lib/types";
@@ -36,6 +42,9 @@ export function DetectorsPage() {
   const { projects, projectId, selectProject } = useProject();
   const { live } = useSidebar();
   const [detectors, setDetectors] = useState<ProjectDetector[]>([]);
+  const [classifiers, setClassifiers] = useState<ProjectClassifier[]>([]);
+  const [classifierPath, setClassifierPath] = useState("");
+  const [classifierName, setClassifierName] = useState("");
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [detectorId, setDetectorId] = useState<number | null>(null);
   const [sessionId, setSessionId] = useState<number | null>(null);
@@ -49,6 +58,7 @@ export function DetectorsPage() {
   useEffect(() => {
     if (!projectId) {
       setDetectors([]);
+      setClassifiers([]);
       setSessions([]);
       setLoading(false);
       return;
@@ -57,10 +67,15 @@ export function DetectorsPage() {
     setLoading(true);
     setError(null);
     setComparison(null);
-    Promise.all([listProjectDetectors(projectId), listSessions(projectId)])
-      .then(([detectorRows, sessionRows]) => {
+    Promise.all([
+      listProjectDetectors(projectId),
+      listSessions(projectId),
+      listProjectClassifiers(projectId),
+    ])
+      .then(([detectorRows, sessionRows, classifierRows]) => {
         if (!alive) return;
         setDetectors(detectorRows);
+        setClassifiers(classifierRows);
         setSessions(sessionRows);
         setDetectorId((current) =>
           detectorRows.some((row) => row.id === current)
@@ -147,11 +162,62 @@ export function DetectorsPage() {
     }
   }
 
+  async function importClassifier() {
+    if (!projectId || !classifierPath.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const row = await importProjectClassifier(
+        projectId,
+        classifierPath.trim(),
+        classifierName.trim() || undefined
+      );
+      setClassifiers((current) => [row, ...current]);
+      setClassifierPath("");
+      setClassifierName("");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setClassifierActive(id: number, active: boolean) {
+    if (!projectId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (active) await deactivateProjectClassifier(projectId);
+      else await activateProjectClassifier(projectId, id);
+      setClassifiers((current) =>
+        current.map((row) => ({ ...row, active: active ? false : row.id === id }))
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeClassifier(id: number) {
+    if (!window.confirm("Delete this imported classifier file?")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteProjectClassifier(id);
+      setClassifiers((current) => current.filter((row) => row.id !== id));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="flex min-h-full flex-col">
       <PageHeader
         title="Detectors"
-        description="Import a project ONNX model, check its contract, then compare it with the shipped detector on a recording."
+        description="Import project ONNX detectors and crop classifiers, check their contracts, then compare a detector with the shipped model on a recording."
       />
 
       {!isDesktop ? (
@@ -283,6 +349,93 @@ export function DetectorsPage() {
                         aria-label={`Delete ${row.name}`}
                         disabled={busy}
                         onClick={() => remove(row.id)}
+                      >
+                        <Trash2 className="size-4" aria-hidden="true" />
+                      </Button>
+                    </div>
+                  ))
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Project classifier</CardTitle>
+                <CardDescription>
+                  Scores each live proposal with your ONNX crop classifier instead of the
+                  fingerprint pool. Labels come from a JSON array beside the model, otherwise
+                  from the project classes in id order.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-2">
+                <div className="flex flex-col gap-1.5">
+                  <label
+                    htmlFor="classifier-path"
+                    className="text-xs text-muted-foreground"
+                  >
+                    Model file
+                  </label>
+                  <Input
+                    id="classifier-path"
+                    value={classifierPath}
+                    onChange={(event) => setClassifierPath(event.target.value)}
+                    placeholder="C:\\models\\robot.onnx"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label
+                    htmlFor="classifier-name"
+                    className="text-xs text-muted-foreground"
+                  >
+                    Name
+                  </label>
+                  <Input
+                    id="classifier-name"
+                    value={classifierName}
+                    onChange={(event) => setClassifierName(event.target.value)}
+                    placeholder="Crop classifier"
+                    maxLength={64}
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  disabled={busy || !classifierPath.trim()}
+                  onClick={importClassifier}
+                >
+                  {busy ? "Checking model..." : "Import and warm up"}
+                </Button>
+
+                {classifiers.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No project classifier yet.
+                  </p>
+                ) : (
+                  classifiers.map((row) => (
+                    <div
+                      key={row.id}
+                      className="flex items-start gap-2 rounded-md border border-border p-2"
+                    >
+                      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                        <span className="truncate text-sm font-medium">{row.name}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {row.inputSize} px · {row.labels.length} labels ·{" "}
+                          {formatDate(row.createdAt)}
+                        </span>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant={row.active ? "secondary" : "outline"}
+                        disabled={busy || live}
+                        onClick={() => setClassifierActive(row.id, row.active)}
+                      >
+                        {row.active ? "Deactivate" : "Use live"}
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label={`Delete ${row.name}`}
+                        disabled={busy}
+                        onClick={() => removeClassifier(row.id)}
                       >
                         <Trash2 className="size-4" aria-hidden="true" />
                       </Button>

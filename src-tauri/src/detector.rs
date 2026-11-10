@@ -398,7 +398,7 @@ impl Detector {
 /// Opens the graph on DirectML when Windows offers it, then retries on CPU if
 /// registration or graph loading fails. The retry is intentional: a machine with
 /// an old driver should still run the detector, just more slowly.
-fn open_session(path: &Path) -> Result<(Session, &'static str, Option<String>), String> {
+pub(crate) fn open_session(path: &Path) -> Result<(Session, &'static str, Option<String>), String> {
     #[cfg(windows)]
     {
         let directml = ort::ep::DirectML::default()
@@ -499,7 +499,7 @@ fn sigmoid(value: f32) -> f32 {
 
 /// Area average downscale into CHW, RGB, scaled and normalised the way the export
 /// expects. Stretched to a square, not letterboxed, matching the graph.
-fn preprocess(rgba: &[u8], width: u32, height: u32, size: u32) -> Vec<f32> {
+pub(crate) fn preprocess(rgba: &[u8], width: u32, height: u32, size: u32) -> Vec<f32> {
     let plane = (size * size) as usize;
     let mut data = vec![0f32; plane * 3];
     if width == 0 || height == 0 || rgba.len() < 4 {
